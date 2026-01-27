@@ -13,10 +13,10 @@ from distmeshpy.utils import huniform
 from numpy.typing import NDArray
 
 # Gauss quadrature points
-tri_gauss_points = [[1.0 / 6.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0], [1.0 / 6.0, 2.0 / 3.0]]
+tri_gauss_pts = [[1.0 / 6.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0], [1.0 / 6.0, 2.0 / 3.0]]
 tri_gauss_wts = [1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0]
 
-lin_gauss_points = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
+lin_gauss_pts = [-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)]
 lin_gauss_wts = [1.0, 1.0]
 
 tri_edges = [[0, 1], [1, 2], [2, 0]]
@@ -31,8 +31,8 @@ def heat2d(
     p: NDArray[float],
     t: NDArray[float],
     D: NDArray[float],
-    dbcs: list[tuple[int, float]] = [],
-    nbcs: list[tuple[int, int, int, tuple[float, ...]]] = [],
+    dbcs: list[tuple[int, float]] | None = None,
+    nbcs: list[tuple[int, int, int, tuple[float, ...]]] | None = None,
     source: Callable[[float, float], float] = lambda x, y: 0.0,
 ) -> tuple[NDArray[float], NDArray[float]]:
     """Solve the 2D heat problem
@@ -40,7 +40,7 @@ def heat2d(
     Args:
         p: nodal coordinates
         t: triangulation.  t[:, i] are the ordered node numbers of the ith element
-        D: D[e] is the thermal conductivity of the eth element
+        D: D[e] is the scalar thermal conductivity of the eth element
         dbcs: Dirichlet BCs.  dbcs[i] = [int, float] is the
             node number and prescribed temperature of the ith BC
         nbcs: Neumann BCs.  nbcs[i] = [int, int, int, tuple] is the
@@ -50,9 +50,16 @@ def heat2d(
             If BC type is CONDUCTION, then value = (q,) (conduction on edge)
         source: Heat generation (s(x, y))
 
+    Returns:
+        temp: nodal temperatures
+        r: nodal reactions (including Neumann terms)
+
     """
     K = np.zeros((p.shape[0], p.shape[0]))
     F = np.zeros(p.shape[0])
+
+    dbcs = dbcs or []
+    nbciter: NeumannBoundaryIterator = NeumannBoundaryIterator(nbcs or [])
 
     for e, nodes in enumerate(t):
         pe = p[nodes]
@@ -67,31 +74,34 @@ def heat2d(
         # The equivalent nodal fluxes for the spatially-varying source is found by integrating
         # {Ne(x,y)} * s(x,y), over the element domain using 3-pt Gauss quadrature.
         fe = np.zeros(3)
-        for w, xi in zip(tri_gauss_wts, tri_gauss_points):
-            x = pe[0, 0] * xi[0] + pe[1, 0] * xi[1] + pe[2, 0] * (1.0 - xi[0] - xi[1])
-            y = pe[0, 1] * xi[0] + pe[1, 1] * xi[1] + pe[2, 1] * (1.0 - xi[0] - xi[1])
+        xp, yp = pe[:, 0], pe[:, 1]
+        for w, tc in zip(tri_gauss_wts, tri_gauss_pts):
+            # NOTE: the triangular coordinate `tc` is also a shape function
+            x = xp[0] * tc[0] + xp[1] * tc[1] + xp[2] * (1.0 - tc[0] - tc[1])
+            y = yp[0] * tc[0] + yp[1] * tc[1] + yp[2] * (1.0 - tc[0] - tc[1])
             Ne = shape(pe, x, y)
             fe += Je * w * Ne * source(x, y)
 
-        # Element boundary source array
+        # Element boundary source arrays
         # The equivalent nodal fluxes for the Neumann BCs is found by integrating
         # {Ne(x,y)} * q, along the effected edge using 2-pt Gauss quadrature.
-        for nbc in nbcs:
-            eid, edge, type, value = nbc
-            if eid != e:
-                continue
+        for nbc in nbciter.get(e):
+            edge, type, value = nbc
             nft = tri_edges[edge]  # local node freedom table
-            xa, xb = pe[nft, 0].min(), pe[nft, 0].max()
-            ya, yb = pe[nft, 1].min(), pe[nft, 1].max()
+            x1, y1 = pe[nft[0]]
+            x2, y2 = pe[nft[1]]
+            le = np.hypot(x2 - x1, y2 - y1)
             if type == CONVECTION:
                 h, Too = value
-                raise NotImplementedError("Complete this section")
+                raise NotImplementedError(
+                    "Complete this section by modifying the element local force and stiffness "
+                    "arrays with the convection contribution.  Be sure to remove this error."
+                )
             elif type == CONDUCTION:
                 qb, *_ = value
-                for w, xi in zip(lin_gauss_wts, lin_gauss_points):
-                    x = 0.5 * (xb - xa) * xi + 0.5 * (xb + xa)
-                    y = 0.5 * (yb - ya) * xi + 0.5 * (yb + ya)
-                    le = np.sqrt((xb - xa) ** 2 + (yb - ya) ** 2)
+                for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
+                    x = 0.5 * (1.0 - xi) * x1 + 0.5 * (1 + xi) * x2
+                    y = 0.5 * (1.0 - xi) * y1 + 0.5 * (1 + xi) * y2
                     J = le / 2.0
                     N = shape(pe, x, y)
                     fe[nft] += qb * N[nft] * w * J
@@ -99,13 +109,14 @@ def heat2d(
         K[np.ix_(nodes, nodes)] += ke
         F[nodes] += fe
 
-    # Enforce boundary conditions
+    # Enforce dirichlet boundary conditions
     Kbc = K.copy()
     Fbc = F.copy()
-
-    # Left boundary
     for node, T in dbcs:
-        raise NotImplementedError("Complete this section")
+        raise NotImplementedError(
+            "Complete this section by modifying Kbc and Fbc with the Dirichlet boundary "
+            "conditions.  Be sure to remove this error."
+        )
 
     # Solve for nodal temperature and reactions
     temp = np.linalg.solve(Kbc, Fbc)
@@ -143,6 +154,26 @@ def shapegrad(p: NDArray[float]) -> NDArray[float]:
     B[0, :] = [yp[1] - yp[2], yp[2] - yp[0], yp[0] - yp[1]]
     B[1, :] = [xp[2] - xp[1], xp[0] - xp[2], xp[1] - xp[0]]
     return B / 2.0 / A
+
+
+class NeumannBoundaryIterator:
+    def __init__(self, nbcs: list[tuple[int, int, int, tuple[float, ...]]]) -> None:
+        self.data = sorted(nbcs, key=lambda x: (x[0], x[1]))
+        self.position = 0
+        self.size = len(self.data)
+
+    def get(self, e: int) -> list[tuple[int, int, tuple[float, ...]]]:
+        result: list[tuple[int, int, tuple[float, ...]]] = []
+        while self.position < self.size:
+            eid, edge, type, value = self.data[self.position]
+            if eid < e:
+                self.position += 1
+                continue
+            if eid > e:
+                break
+            result.append((edge, type, value))
+            self.position += 1
+        return result
 
 
 def tplot(p: NDArray[float], t: NDArray[int], temp: NDArray[float]) -> None:
@@ -321,7 +352,7 @@ def verify(esize: float = 0.05):
 
 
 def mms(esize: float = 0.05):
-    raise NotImplementedError
+    raise NotImplementedError("Implement the MMS portion")
 
 
 def main() -> int:
