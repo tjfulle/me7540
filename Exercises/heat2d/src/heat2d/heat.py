@@ -1,5 +1,6 @@
 import argparse
 import sys
+from functools import reduce
 from typing import Callable
 
 import matplotlib.pyplot as plt
@@ -93,10 +94,13 @@ def heat2d(
             le = np.hypot(x2 - x1, y2 - y1)
             if type == CONVECTION:
                 h, Too = value
-                raise NotImplementedError(
-                    "Complete this section by modifying the element local force and stiffness "
-                    "arrays with the convection contribution.  Be sure to remove this error."
-                )
+                for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
+                    x = 0.5 * (1.0 - xi) * x1 + 0.5 * (1 + xi) * x2
+                    y = 0.5 * (1.0 - xi) * y1 + 0.5 * (1 + xi) * y2
+                    J = le / 2.0
+                    N = shape(pe, x, y)
+                    fe[nft] += h * Too * N[nft] * w * J
+                    ke[np.ix_(nft, nft)] += h * np.outer(N[nft], N[nft]) * w * J
             elif type == CONDUCTION:
                 qb, *_ = value
                 for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
@@ -113,10 +117,9 @@ def heat2d(
     Kbc = K.copy()
     Fbc = F.copy()
     for node, T in dbcs:
-        raise NotImplementedError(
-            "Complete this section by modifying Kbc and Fbc with the Dirichlet boundary "
-            "conditions.  Be sure to remove this error."
-        )
+        Kbc[node, :] = 0.0
+        Kbc[node, node] = 1.0
+        Fbc[node] = T
 
     # Solve for nodal temperature and reactions
     temp = np.linalg.solve(Kbc, Fbc)
@@ -196,6 +199,24 @@ def tplot(p: NDArray[float], t: NDArray[int], temp: NDArray[float]) -> None:
     plt.close("all")
 
 
+def tplot3d(p: NDArray[float], t: NDArray[int], temp: NDArray[float]) -> None:
+    """Make temperature contour plot"""
+    triang = tri.Triangulation(p[:, 0], p[:, 1], t)
+    fig = plt.figure(figsize=(7, 5))
+    ax = fig.add_subplot(projection="3d")
+    surf = ax.plot_trisurf(triang, temp, cmap="turbo", linewidth=.2, antialiased=True)
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("Temperature")
+    fig.colorbar(surf, ax=ax, shrink=0.6, label="Temperature")
+
+    plt.show()
+
+    plt.clf()
+    plt.cla()
+    plt.close("all")
+
+
 def rplot(p: NDArray[float], t: NDArray[int], r: NDArray[float]) -> None:
     """Make plots of reactions on left and right edges"""
     _, axs = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
@@ -259,11 +280,7 @@ def example(esize: float = 0.05):
     • Convection along top edge: far field temperature 25˚ with convection coefficient 250
 
     """
-    fd = lambda p: ddiff(drectangle(p, -1, 1, -1, 1), dcircle(p, 0, 0, 0.5))
-    fh = lambda p: 0.05 + 0.3 * dcircle(p, 0, 0, 0.5)
-    bbox = ((-1.0, 1.0), (-1.0, 1.0))
-    fixed = np.array([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
-    p, t = distmesh2d(fd, fh, esize, bbox, fixed)
+    p, t = plate_with_hole(esize=esize)
 
     # Generate Dirichlet BCs: fixed temperature on left (200˚) and right (50˚) sides
     dbcs: list[tuple[int, float]] = []
@@ -316,13 +333,9 @@ def verify(esize: float = 0.05):
     T = 366.333˚ along the top edge
 
     """
-    fd = lambda p: drectangle(p, -1, 1, -1, 1)
-    fh = lambda p: huniform(p)
-    bbox = ((-1.0, 1.0), (-1.0, 1.0))
-    fixed = np.array([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
-    p, t = distmesh2d(fd, fh, esize, bbox, fixed)
+    p, t = uniform_plate(esize=esize)
 
-    # Generate Neumann BCs: convection on top surface and conduction on bottom
+    # enerate Neumann BCs: convection on top surface and conduction on bottom
     nbcs: list[tuple[int, int, int, tuple[float, ...]]] = []
     for e, nodes in enumerate(t):
         jhi = [node for node in nodes if isclose(p[node, 1], 1.0)]
@@ -346,13 +359,53 @@ def verify(esize: float = 0.05):
     s = lambda x, y: 0.0
     D = np.ones(t.shape[0]) * 12.0
     temp, r = heat2d(p, t, D, source=s, nbcs=nbcs)
-    print(temp[np.where(np.abs(p[:, 1] - 1.0) < 1e-6)[0]])
-    print(temp[np.where(np.abs(p[:, 1] + 1.0) < 1e-6)[0]])
+    thi = temp[np.where(np.abs(p[:, 1] - 1.0) < 1e-6)[0]]
+    assert np.allclose(thi, 33)
+    tlo = temp[np.where(np.abs(p[:, 1] + 1.0) < 1e-6)[0]]
+    assert np.allclose(tlo, 366.33333)
     tplot(p, t, temp)
 
 
 def mms(esize: float = 0.05):
-    raise NotImplementedError("Implement the MMS portion")
+    p, t = plate_with_hole(esize=esize)
+
+    k = 12.0
+    T = lambda x, y: np.cos(12 * x ** 2) * y
+    s = lambda x, y: 24 * k * y * (np.sin(12 * x ** 2) + 24 * x ** 2 * np.cos(12 * x ** 2))
+
+    # Generate Dirichlet BCs
+    ilo = np.where(np.abs(p[:, 0] + 1.0) < 1e-6)[0]  # LHS
+    jlo = np.where(np.abs(p[:, 1] + 1.0) < 1e-6)[0]  # Bottom
+    ihi = np.where(np.abs(p[:, 0] - 1.0) < 1e-6)[0]  # RHS
+    jhi = np.where(np.abs(p[:, 1] - 1.0) < 1e-6)[0]  # Top
+    boundary_nodes = reduce(np.union1d, (ilo, jlo, ihi, jhi))
+    prescribed_temperatures = T(p[boundary_nodes, 0], p[boundary_nodes, 1])
+    dbcs = list(zip(boundary_nodes, prescribed_temperatures))
+
+    D = np.ones(t.shape[0]) * k
+    temp, r = heat2d(p, t, D, source=s, dbcs=dbcs)
+    analytic = T(p[:, 0], p[:, 1])
+    tplot(p, t, temp)
+    tplot3d(p, t, temp)
+    tplot3d(p, t, temp - analytic)
+
+
+def plate_with_hole(esize: float) -> tuple[NDArray[float], NDArray[int]]:
+    fd = lambda p: ddiff(drectangle(p, -1, 1, -1, 1), dcircle(p, 0, 0, 0.5))
+    fh = lambda p: 0.05 + 0.3 * dcircle(p, 0, 0, 0.5)
+    bbox = ((-1.0, 1.0), (-1.0, 1.0))
+    fixed = np.array([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
+    p, t = distmesh2d(fd, fh, esize, bbox, fixed)
+    return p, t
+
+
+def uniform_plate(esize: float) -> tuple[NDArray[float], NDArray[int]]:
+    fd = lambda p: drectangle(p, -1, 1, -1, 1)
+    fh = lambda p: huniform(p)
+    bbox = ((-1.0, 1.0), (-1.0, 1.0))
+    fixed = np.array([[-1.0, -1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]])
+    p, t = distmesh2d(fd, fh, esize, bbox, fixed)
+    return p, t
 
 
 def main() -> int:
@@ -368,6 +421,7 @@ def main() -> int:
         mms(esize=args.s)
     else:
         p.error(f"Unknown problem {args.problem}")
+    return 0
 
 
 if __name__ == "__main__":
