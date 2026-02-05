@@ -13,6 +13,11 @@ from distmeshpy.utils import drectangle
 from distmeshpy.utils import huniform
 from numpy.typing import NDArray
 
+np.set_printoptions(precision=2)
+
+# Heat transfer: 1 degree of freedom per node
+dof_per_node = 1
+
 # Gauss quadrature points
 tri_gauss_pts = [[1.0 / 6.0, 1.0 / 6.0], [2.0 / 3.0, 1.0 / 6.0], [1.0 / 6.0, 2.0 / 3.0]]
 tri_gauss_wts = [1.0 / 6.0, 1.0 / 6.0, 1.0 / 6.0]
@@ -47,7 +52,7 @@ def heat2d(
         nbcs: Neumann BCs.  nbcs[i] = [int, int, int, tuple] is the
             element number, edge number, BC type, and value of the ith BC
             The BC type should be one of CONDUCTION or CONVECTION
-            If BC type is CONVECTION, then value = (h, Too) (convection coefficient and far field temp)
+            If BC type is CONVECTION, then value = (h, t0) (convection coefficient and far field temp)
             If BC type is CONDUCTION, then value = (q,) (conduction on edge)
         source: Heat generation (s(x, y))
 
@@ -56,76 +61,92 @@ def heat2d(
         r: nodal reactions (including Neumann terms)
 
     """
-    K = np.zeros((p.shape[0], p.shape[0]))
-    F = np.zeros(p.shape[0])
+    nnode = p.shape[0]
+    ndof = dof_per_node * nnode
+    node_per_elem = t.shape[1]
+    dof_per_elem = node_per_elem * dof_per_node
+
+    K = np.zeros((ndof, ndof))
+    F = np.zeros(ndof)
 
     dbcs = dbcs or []
     nbciter: NeumannBoundaryIterator = NeumannBoundaryIterator(nbcs or [])
 
     for e, nodes in enumerate(t):
         pe = p[nodes]
-        Be = shapegrad(pe)
+        dN = shapegrad(pe)
+        Be = bmatrix(dN)
         Ae = area(pe)
         Je = 2.0 * Ae
 
         # Element stiffness matrix
-        ke = Ae * D[e] * np.dot(Be.T, Be)
+        ke = Ae * np.dot(np.dot(Be.T, D[e]), Be)
 
         # Element body source array
         # The equivalent nodal fluxes for the spatially-varying source is found by integrating
         # {Ne(x,y)} * s(x,y), over the element domain using 3-pt Gauss quadrature.
-        fe = np.zeros(3)
+        fe = np.zeros(dof_per_elem)
         xp, yp = pe[:, 0], pe[:, 1]
         for w, tc in zip(tri_gauss_wts, tri_gauss_pts):
             # NOTE: the triangular coordinate `tc` is also a shape function
             x = xp[0] * tc[0] + xp[1] * tc[1] + xp[2] * (1.0 - tc[0] - tc[1])
             y = yp[0] * tc[0] + yp[1] * tc[1] + yp[2] * (1.0 - tc[0] - tc[1])
             Ne = shape(pe, x, y)
-            fe += Je * w * Ne * source(x, y)
+            Pe = pmatrix(Ne)
+            fe += w * Je * np.dot(Pe, [source(x, y)])
 
         # Element boundary source arrays
         # The equivalent nodal fluxes for the Neumann BCs is found by integrating
         # {Ne(x,y)} * q, along the effected edge using 2-pt Gauss quadrature.
         for nbc in nbciter.get(e):
             edge, type, value = nbc
-            nft = tri_edges[edge]  # local node freedom table
-            x1, y1 = pe[nft[0]]
-            x2, y2 = pe[nft[1]]
+            edge_nodes = tri_edges[edge]  # local node freedom table
+            nft = dofmap(edge_nodes)
+            x1, y1 = pe[edge_nodes[0]]
+            x2, y2 = pe[edge_nodes[1]]
             le = np.hypot(x2 - x1, y2 - y1)
             if type == CONVECTION:
-                h, Too = value
+                h, t0 = value
                 for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
                     x = 0.5 * (1.0 - xi) * x1 + 0.5 * (1 + xi) * x2
                     y = 0.5 * (1.0 - xi) * y1 + 0.5 * (1 + xi) * y2
                     J = le / 2.0
-                    N = shape(pe, x, y)
-                    fe[nft] += h * Too * N[nft] * w * J
-                    ke[np.ix_(nft, nft)] += h * np.outer(N[nft], N[nft]) * w * J
+                    Ne = shape(pe, x, y)
+                    Pe = pmatrix(Ne)[nft]
+                    fe[nft] += w * J * np.dot(Pe, [h * t0])
+                    ke[np.ix_(nft, nft)] += w * J * np.dot(np.dot(Pe, h), Pe.T)
             elif type == CONDUCTION:
                 qb, *_ = value
                 for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
                     x = 0.5 * (1.0 - xi) * x1 + 0.5 * (1 + xi) * x2
                     y = 0.5 * (1.0 - xi) * y1 + 0.5 * (1 + xi) * y2
                     J = le / 2.0
-                    N = shape(pe, x, y)
-                    fe[nft] += qb * N[nft] * w * J
+                    Ne = shape(pe, x, y)
+                    Pe = pmatrix(Ne)[nft]
+                    fe[nft] += w * J * np.dot(Pe, [qb])
 
-        K[np.ix_(nodes, nodes)] += ke
-        F[nodes] += fe
+        nft = dofmap(nodes)
+        K[np.ix_(nft, nft)] += ke
+        F[nft] += fe
 
     # Enforce dirichlet boundary conditions
     Kbc = K.copy()
     Fbc = F.copy()
     for node, T in dbcs:
-        Kbc[node, :] = 0.0
-        Kbc[node, node] = 1.0
-        Fbc[node] = T
+        dof = node * dof_per_node + 0
+        Kbc[dof, :] = 0.0
+        Kbc[dof, dof] = 1.0
+        Fbc[dof] = T
 
     # Solve for nodal temperature and reactions
     temp = np.linalg.solve(Kbc, Fbc)
     r = np.dot(K, temp) - F
 
     return temp, r
+
+
+def dofmap(nodes: list[int]) -> list[int]:
+    return [dof_per_node * n + d for n in nodes for d in range(dof_per_node)]
 
 
 def area(p: NDArray[float]) -> float:
@@ -150,6 +171,23 @@ def shape(p: NDArray[float], x: float, y: float) -> NDArray[float]:
     return N / 2.0 / A
 
 
+def pmatrix(N: NDArray[float]) -> NDArray[float]:
+    """The element P matrix (matrix of the shape functions)
+
+    Args:
+      N: shape function
+
+    Returns:
+      P: shape functions such that f = P.d for d = [d1 d2 ... dn]
+
+    3, 1 . 1, 3
+
+    """
+    P = np.zeros((3, 1))
+    P[:, 0] = N
+    return P
+
+
 def shapegrad(p: NDArray[float]) -> NDArray[float]:
     A = area(p)
     xp, yp = p[:, 0], p[:, 1]
@@ -157,6 +195,24 @@ def shapegrad(p: NDArray[float]) -> NDArray[float]:
     B[0, :] = [yp[1] - yp[2], yp[2] - yp[0], yp[0] - yp[1]]
     B[1, :] = [xp[2] - xp[1], xp[0] - xp[2], xp[1] - xp[0]]
     return B / 2.0 / A
+
+
+def bmatrix(dN: NDArray[float]) -> NDArray[float]:
+    """The element B matrix (matrix of derivatives of the shape functions)
+
+    Args:
+      dN: shape function gradient
+
+    Returns:
+      B: shape function gradient transformed such that grad(d) = B.d for d = [d1 d2 ... dn]
+
+    Note:
+      For scalar-valued problems, the B matrix is dN
+    """
+    B = np.zeros((2, 3))
+    B[0] = dN[0]
+    B[1] = dN[1]
+    return B
 
 
 class NeumannBoundaryIterator:
@@ -179,17 +235,23 @@ class NeumannBoundaryIterator:
         return result
 
 
-def tplot(p: NDArray[float], t: NDArray[int], temp: NDArray[float]) -> None:
+def tplot(
+    p: NDArray[float],
+    t: NDArray[int],
+    z: NDArray[float],
+    label: str = "Temperature",
+    title: str = "FEA Solution",
+) -> None:
     """Make temperature contour plot"""
     triang = tri.Triangulation(p[:, 0], p[:, 1], t)
     plt.figure(figsize=(7, 5))
-    countour = plt.tricontourf(triang, temp, levels=50, cmap="turbo")
+    countour = plt.tricontourf(triang, z, levels=50, cmap="turbo")
     plt.triplot(triang, color="k", linewidth=0.3)
-    plt.colorbar(countour, label="Temperature")
+    plt.colorbar(countour, label=label)
     plt.xlabel("x")
     plt.ylabel("y")
 
-    plt.title("Temperature field")
+    plt.title(title)
     plt.axis("equal")
     plt.tight_layout()
     plt.show()
@@ -199,17 +261,24 @@ def tplot(p: NDArray[float], t: NDArray[int], temp: NDArray[float]) -> None:
     plt.close("all")
 
 
-def tplot3d(p: NDArray[float], t: NDArray[int], temp: NDArray[float]) -> None:
+def tplot3d(
+    p: NDArray[float],
+    t: NDArray[int],
+    z: NDArray[float],
+    label: str = "Temperature",
+    title: str = "Temperature field",
+) -> None:
     """Make temperature contour plot"""
     triang = tri.Triangulation(p[:, 0], p[:, 1], t)
     fig = plt.figure(figsize=(7, 5))
     ax = fig.add_subplot(projection="3d")
-    surf = ax.plot_trisurf(triang, temp, cmap="turbo", linewidth=.2, antialiased=True)
+    surf = ax.plot_trisurf(triang, z, cmap="turbo", linewidth=.2, antialiased=True)
     ax.set_xlabel("x")
     ax.set_ylabel("y")
-    ax.set_zlabel("Temperature")
-    fig.colorbar(surf, ax=ax, shrink=0.6, label="Temperature")
+    ax.set_zlabel(label)
+    fig.colorbar(surf, ax=ax, shrink=0.6, label=label)
 
+    plt.title(title)
     plt.show()
 
     plt.clf()
@@ -222,9 +291,7 @@ def rplot(p: NDArray[float], t: NDArray[int], r: NDArray[float]) -> None:
     _, axs = plt.subplots(1, 2, figsize=(12, 4), sharey=True)
 
     # Left reaction
-    ilo = [
-        n for n, x in enumerate(p) if isclose(x[0], -1.0)
-    ]  # Left boundary:  node numbers for x = -1
+    ilo = [n for n, x in enumerate(p) if isclose(x[0], -1.0)]
     ylo = p[ilo, 1]
     rlo = r[ilo]
     ix = np.argsort(ylo)
@@ -238,9 +305,7 @@ def rplot(p: NDArray[float], t: NDArray[int], r: NDArray[float]) -> None:
     axs[0].grid(True)
 
     # Right reaction
-    ihi = [
-        n for n, x in enumerate(p) if isclose(x[0], 1.0)
-    ]  # Right boundary:  node numbers for x = 1
+    ihi = [n for n, x in enumerate(p) if isclose(x[0], 1.0)]
     yhi = p[ihi, 1]
     rhi = r[ihi]
     ix = np.argsort(yhi)
@@ -367,7 +432,7 @@ def verify(esize: float = 0.05):
 
 
 def mms(esize: float = 0.05):
-    p, t = plate_with_hole(esize=esize)
+    p, t = uniform_plate(esize=esize)
 
     k = 12.0
     T = lambda x, y: np.cos(12 * x ** 2) * y
@@ -387,7 +452,7 @@ def mms(esize: float = 0.05):
     analytic = T(p[:, 0], p[:, 1])
     tplot(p, t, temp)
     tplot3d(p, t, temp)
-    tplot3d(p, t, temp - analytic)
+    tplot3d(p, t, temp - analytic, label="$T - T_{ana}$", title="Error in FEA solution")
 
 
 def plate_with_hole(esize: float) -> tuple[NDArray[float], NDArray[int]]:
