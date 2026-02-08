@@ -34,9 +34,6 @@ DIRICHLET = 1
 ROBIN = 2
 TRACTION = 3
 
-CONVECTION = None  # Unused in the plane problem
-CONDUCTION = None  # Unused in the plane problem
-
 
 def plane(
     p: NDArray[float],
@@ -67,10 +64,6 @@ def plane(
         r: nodal reactions (including Neumann terms) returned with shape (nnode, 2)
 
     """
-
-    #
-    # WARNING: THE CODE BELOW IS THE UNALTERED HEAT CODE AND WILL NOT WORK FOR THE PLANE PROBLEM
-    #
     nnode = p.shape[0]
     ndof = dof_per_node * nnode
     node_per_elem = t.shape[1]
@@ -103,7 +96,7 @@ def plane(
             y = yp[0] * tc[0] + yp[1] * tc[1] + yp[2] * (1.0 - tc[0] - tc[1])
             Ne = shape(pe, x, y)
             Pe = pmatrix(Ne)
-            fe += w * Je * np.dot(Pe, [source(x, y)])
+            fe += w * Je * np.dot(Pe, source(x, y))
 
         # Element boundary source arrays
         # The equivalent nodal fluxes for the Neumann BCs is found by integrating
@@ -115,25 +108,25 @@ def plane(
             x1, y1 = pe[edge_nodes[0]]
             x2, y2 = pe[edge_nodes[1]]
             le = np.hypot(x2 - x1, y2 - y1)
-            if type == CONVECTION:
-                h, t0 = value
+            if type == ROBIN:
+                H, t0 = value
                 for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
                     x = 0.5 * (1.0 - xi) * x1 + 0.5 * (1 + xi) * x2
                     y = 0.5 * (1.0 - xi) * y1 + 0.5 * (1 + xi) * y2
                     J = le / 2.0
                     Ne = shape(pe, x, y)
                     Pe = pmatrix(Ne)[nft]
-                    fe[nft] += w * J * np.dot(Pe, [h * t0])
-                    ke[np.ix_(nft, nft)] += w * J * np.dot(np.dot(Pe, h), Pe.T)
-            elif type == CONDUCTION:
-                qb, *_ = value
+                    fe[nft] += w * J * np.dot(Pe, np.dot(H, t0))
+                    ke[np.ix_(nft, nft)] += w * J * np.dot(np.dot(Pe, H), Pe.T)
+            elif type == TRACTION:
+                tx, ty = value
                 for w, xi in zip(lin_gauss_wts, lin_gauss_pts):
                     x = 0.5 * (1.0 - xi) * x1 + 0.5 * (1 + xi) * x2
                     y = 0.5 * (1.0 - xi) * y1 + 0.5 * (1 + xi) * y2
                     J = le / 2.0
                     Ne = shape(pe, x, y)
                     Pe = pmatrix(Ne)[nft]
-                    fe[nft] += w * J * np.dot(Pe, [qb])
+                    fe[nft] += w * J * np.dot(Pe, [tx, ty])
 
         nft = dofmap(nodes)
         K[np.ix_(nft, nft)] += ke
@@ -142,17 +135,19 @@ def plane(
     # Enforce dirichlet boundary conditions
     Kbc = K.copy()
     Fbc = F.copy()
-    for node, T in dbcs:
-        dof = node * dof_per_node + 0
+    for node, ldof, u in dbcs:
+        dof = node * dof_per_node + ldof
+        Fbc -= Kbc[:, dof] * u
         Kbc[dof, :] = 0.0
+        Kbc[:, dof] = 0.0
         Kbc[dof, dof] = 1.0
-        Fbc[dof] = T
+        Fbc[dof] = u
 
-    # Solve for nodal temperature and reactions
-    temp = np.linalg.solve(Kbc, Fbc)
-    r = np.dot(K, temp) - F
+    # Solve for nodal displacements and reactions
+    d = np.linalg.solve(Kbc, Fbc)
+    r = np.dot(K, d) - F
 
-    return temp, r
+    return d.reshape((nnode, -1)), r.reshape((nnode, -1))
 
 
 def dofmap(nodes: list[int]) -> list[int]:
@@ -198,8 +193,7 @@ def shapegrad(p: NDArray[float]) -> NDArray[float]:
     return dN / 2.0 / A
 
 
-def bmatrix(p: NDArray[float]) -> NDArray[float]:
-    dN = shapegrad(p)
+def bmatrix(dN: NDArray[float]) -> NDArray[float]:
     B = np.zeros((3, 6))
     B[0, 0::2] = dN[0]
     B[1, 1::2] = dN[1]
@@ -228,13 +222,7 @@ class NeumannBoundaryIterator:
         return result
 
 
-def cplot(
-    p: NDArray[float],
-    t: NDArray[int],
-    z: NDArray[float],
-    label: str | None = None,
-    title: str = "FEA Solution",
-) -> None:
+def tplot(p: NDArray[float], t: NDArray[int], z: NDArray[float]) -> None:
     """Make a 2D contour plot
 
     Args:
@@ -247,11 +235,11 @@ def cplot(
     plt.figure(figsize=(7, 5))
     countour = plt.tricontourf(triang, z, levels=50, cmap="turbo")
     plt.triplot(triang, color="k", linewidth=0.3)
-    plt.colorbar(countour, label=label)
+    plt.colorbar(countour, label=None)
     plt.xlabel("x")
     plt.ylabel("y")
 
-    plt.title(title)
+    plt.title("Temperature field")
     plt.axis("equal")
     plt.tight_layout()
     plt.show()
@@ -309,7 +297,7 @@ def exercise(esize: float = 0.05):
     scale = 0.25 / np.max(np.abs(u))
     U = np.linalg.norm(u, axis=1)
     print(np.amax(U))
-    cplot(p + scale * u, t, U, label="Displacment norm")
+    tplot(p + scale * u, t, U)
 
 
 def plate_with_hole(esize: float) -> tuple[NDArray[float], NDArray[int]]:
