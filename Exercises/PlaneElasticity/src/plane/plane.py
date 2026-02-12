@@ -527,10 +527,6 @@ def exercise(esize: float = 0.05):
     print(np.amax(U))
     tplot(mesh.coords + scale * u, mesh.connect, U)
 
-    from .done import exercise as exxx
-
-    exxx(p, t)
-
 
 def plate_with_hole(esize: float) -> tuple[NDArray, NDArray]:
     fd = lambda p: ddiff(drectangle(p, -1, 1, -1, 1), dcircle(p, 0, 0, 0.5))
