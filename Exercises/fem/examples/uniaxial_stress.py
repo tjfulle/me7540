@@ -5,20 +5,12 @@ from typing import Sequence
 import numpy as np
 
 import fem
-X = fem.X
-Y = fem.Y
 
 
 def exercise(esize: float = 0.05):
     class Everywhere(fem.collections.RegionSelector):
         def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
             return True
-
-    class Top(fem.collections.RegionSelector):
-        def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
-            if on_boundary and x[1] > 0.999:
-                return True
-            return False
 
     class Bottom(fem.collections.RegionSelector):
         def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
@@ -29,18 +21,18 @@ def exercise(esize: float = 0.05):
     nodes, elements = fem.meshing.plate_with_hole(esize=esize)
     mesh_builder = fem.builder.MeshBuilder(nodes=nodes, elements=elements)
     mesh_builder.block(name="Block-1", region=Everywhere(), cell_type=fem.cell.Tri3)
-    mesh_builder.nodeset("Top", region=Top())
+    mesh_builder.nodeset("Point", region=lambda x, on_boundary: abs(x[0]) < 0.05 and x[1] > 0.999)
+    mesh_builder.nodeset("Top", region=lambda x, on_boundary: x[1] > 0.99)
     mesh_builder.sideset("Bottom", region=Bottom())
-    mesh_builder.elemset("All", region=Everywhere())
     mesh = mesh_builder.emit_mesh()
 
-    m = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
     builder = fem.builder.ModelBuilder(mesh)
-    builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=m)
+    material = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
+    builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=material)
     step = builder.static_step()
-    step.boundary(nodeset="Top", dofs=[X, Y], value=0.0)
-    step.traction(sideset="Bottom", magnitude=500e3, direction=[4/5, -3/5])
-    step.gravity(elemset="All", g=9.81, direction=[0, -1])
+    step.boundary(nodeset="Point", dofs=[0, 1], value=0.0)
+    step.boundary(nodeset="Top", dofs=[1], value=0.0)
+    step.traction(sideset="Bottom", magnitude=1e8, direction=[0, -1])
     model = builder.assemble()
     model.solve()
     solution = model.steps[0].solution

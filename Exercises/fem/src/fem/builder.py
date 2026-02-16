@@ -1,33 +1,35 @@
 import logging
+from abc import ABC
+from abc import abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
-from dataclasses import field
 from typing import Sequence
 from typing import Type
 
 import numpy as np
 from numpy.typing import NDArray
 
-from .step import Step
-from .step import StaticStep
 from . import collections
 from .block import ElementBlock
 from .block import TopoBlock
 from .cell import Cell
 from .collections import DistributedLoad
 from .collections import DistributedSurfaceLoad
-from .collections import PressureLoad
-from .collections import TractionLoad
-from .collections import RobinLoad
-from .collections import ConstantNodalField
-from .collections import GravityLoad
 from .collections import Field
-from .collections import Load
-from .collections import NodalFieldEvaluator
+from .collections import GravityLoad
+from .collections import PressureLoad
+from .collections import RobinLoad
+from .collections import Solution
+from .collections import TractionLoad
 from .element import Element
 from .material import Material
+from .mesh import Mesh
 from .model import Model
+from .step import StaticStep
+from .step import Step
+from .typing import DLoadT
+from .typing import DSLoadT
 from .typing import RegionSelector
+from .typing import RLoadT
 
 ArrayLike = NDArray | Sequence
 
@@ -101,7 +103,7 @@ class MeshBuilder:
         self.construct_elemsets()
         self.construct_sidesets()
 
-    def emit_mesh(self) -> "Mesh":
+    def emit_mesh(self) -> Mesh:
         if not self.assembled:
             self.assemble()
         return Mesh(
@@ -235,8 +237,8 @@ class MeshBuilder:
                 if name not in self.nodesets:
                     raise ValueError(f"{name}: could not find nodes in region")
             elif nodes is not None:
-                for node in nodes:
-                    self.nodesets[name].append(self.node_map.local(node))
+                for gid in nodes:
+                    self.nodesets[name].append(self.node_map.local(gid))
 
     def elemset(self, name: str, region: RegionSelector) -> None:
         elemsets = self.metadata["elemsets"]
@@ -275,11 +277,181 @@ class MeshBuilder:
                     self.sidesets[name].append((edge.element, edge.edge))
 
 
-DSloadT = dict[int, dict[int, list[tuple[int, DistributedSurfaceLoad]]]]
-RloadT = dict[int, dict[int, list[RobinLoad]]]
-DloadT = dict[int, dict[int, list[DistributedLoad]]]
+class StepBuilder(ABC):
+    def __init__(self, name: str, period: float = 1.0) -> None:
+        self.name = name
+        self.period = period
+        self.metadata: dict[str, dict] = defaultdict(dict)
 
-# {b: {e: evaluator}}
+    @abstractmethod
+    def assemble(self, model: Model, parent: Step | None) -> Step: ...
+
+
+class StaticStepBuilder(StepBuilder):
+    def __init__(self, name: str, period: float = 1.0) -> None:
+        super().__init__(name=name, period=period)
+        self.dbcs: list[tuple[int, int, float]] = []
+        self.nbcs: list[tuple[int, int, float]] = []
+        self.dsloads: DSLoadT = defaultdict(lambda: defaultdict(list))
+        self.rloads: RLoadT = defaultdict(lambda: defaultdict(list))
+        self.dloads: DLoadT = defaultdict(lambda: defaultdict(list))
+        self.mpcs: list[list[int | float]] = []
+
+    def boundary(self, *, nodeset: str, dofs: int | list[int], value: float = 0.0) -> None:
+        if isinstance(dofs, int):
+            dofs = [dofs]
+        dbcs = self.metadata["dbcs"]
+        dbcs[f"dbc-{len(dbcs)}"] = (nodeset, dofs, value)
+
+    def point_load(self, *, nodeset: str, dofs: int | list[int], value: float = 0.0) -> None:
+        if isinstance(dofs, int):
+            dofs = [dofs]
+        nbcs = self.metadata["nbcs"]
+        nbcs[f"nbc-{len(nbcs)}"] = (nodeset, dofs, value)
+
+    def traction(self, *, sideset: str, magnitude: float, direction: Sequence[float]) -> None:
+        dsloads = self.metadata["dsloads"]
+        dsloads[f"dsload-{len(dsloads)}"] = ("traction", sideset, magnitude, direction)
+
+    def pressure(self, *, sideset: str, magnitude: float) -> None:
+        dsloads = self.metadata["dsloads"]
+        dsloads[f"dsload-{len(dsloads)}"] = ("pressure", sideset, magnitude)
+
+    def gravity(self, *, elemset: str, g: float, direction: Sequence[float]) -> None:
+        dloads = self.metadata["dloads"]
+        dloads[f"dload-{len(dloads)}"] = ("gravity", elemset, g, direction)
+
+    def dload(self, *, elemset: str, field: Field) -> None:
+        dloads = self.metadata["dloads"]
+        dloads[f"dload-{len(dloads)}"] = ("dload", elemset, field)
+
+    def robin(self, *, sideset: str, u0: NDArray, H: NDArray) -> None:
+        rloads = self.metadata["rloads"]
+        rloads[f"rload-{len(rloads)}"] = (sideset, H, u0)
+
+    def constraint(
+        self,
+        *,
+        nodes: list[int],
+        dofs: list[int],
+        coeffs: list[float],
+        rhs: float = 0.0,
+    ) -> None:
+        if not (len(nodes) == len(dofs) == len(coeffs)):
+            raise ValueError("nodes, dofs, and coeffs must be same length")
+        constraints = self.metadata["constraints"]
+        constraints[f"constraint-{len(constraints)}"] = (nodes, dofs, coeffs, rhs)
+
+    def assemble(self, model: Model, parent: Step | None) -> StaticStep:
+        self.construct_dbcs(model)
+        self.construct_nbcs(model)
+        self.construct_dloads(model)
+        self.construct_dsloads(model)
+        self.construct_rloads(model)
+        self.construct_constraints(model)
+        return StaticStep(
+            name=self.name,
+            parent=parent,
+            period=self.period,
+            dbcs=self.dbcs,
+            nbcs=self.nbcs,
+            dsloads=self.dsloads,
+            dloads=self.dloads,
+            rloads=self.rloads,
+            equations=self.mpcs,
+        )
+
+    def construct_dbcs(self, model: Model) -> None:
+        for nodeset, dofs, value in self.metadata.get("dbcs", {}).values():
+            if nodeset not in model.nodesets:
+                raise ValueError(f"nodeset {nodeset} not defined")
+            lids: list[int] = model.nodesets[nodeset]
+            for lid in lids:
+                for dof in dofs:
+                    self.dbcs.append((lid, dof, value))
+
+    def construct_nbcs(self, model: Model) -> None:
+        for nodeset, dofs, value in self.metadata.get("nbcs", {}).values():
+            if nodeset not in model.nodesets:
+                raise ValueError(f"nodeset {nodeset} not defined")
+            lids: list[int] = model.nodesets[nodeset]
+            for lid in lids:
+                for dof in dofs:
+                    self.nbcs.append((lid, dof, value))
+
+    def construct_dloads(self, model: Model) -> None:
+        dload: DistributedLoad
+        for ltype, elemset, *args in self.metadata.get("dloads", {}).values():
+            if elemset not in model.elemsets:
+                raise ValueError(f"element set {elemset} not defined")
+            if ltype == "gravity":
+                pass
+            elif ltype == "dload":
+                field = args[0]
+                dload = DistributedLoad(field=field)
+            else:
+                raise ValueError(f"Unknown ltype: {ltype}")
+            for lid in model.elemsets[elemset]:
+                gid = model.elem_map[lid]
+                block_no = model.block_elem_map[lid]
+                block = model.blocks[block_no]
+                if ltype == "gravity":
+                    g, direction = args
+                    dload = GravityLoad(block.material.density * g, direction)
+                e = block.elem_map.local(gid)
+                self.dloads[block_no][e].append(dload)
+
+    def construct_dsloads(self, model: Model) -> None:
+        dsload: DistributedSurfaceLoad
+        for ltype, sideset, *args in self.metadata.get("dsloads", {}).values():
+            if sideset not in model.sidesets:
+                raise ValueError(f"side set {sideset} not defined")
+            if ltype == "traction":
+                magnitude, direction = args
+                dsload = TractionLoad(magnitude=magnitude, direction=direction)
+            elif ltype == "pressure":
+                magnitude = args[0]
+                dsload = PressureLoad(magnitude=magnitude)
+            else:
+                raise ValueError(f"Unknown ltype: {ltype}")
+            for elem_no, edge_no in model.sidesets[sideset]:
+                block_no = model.block_elem_map[elem_no]
+                block = model.blocks[block_no]
+                gid = model.elem_map[elem_no]
+                lid = block.elem_map.local(gid)
+                self.dsloads[block_no][lid].append((edge_no, dsload))
+
+    def construct_rloads(self, model: Model) -> None:
+        sideset: str
+        H: NDArray
+        u0: NDArray
+        for sideset, H, u0 in self.metadata.get("rloads", {}).values():
+            for ele_no, edge_no in model.sidesets[sideset]:
+                block_no = model.block_elem_map[ele_no]
+                block = model.mesh.blocks[block_no]
+                conn = model.connect[ele_no]
+                p = model.coords[conn]
+                x = block.cell_type.edge_centroid(edge_no, p)
+
+                gid = block.elem_map[ele_no]
+                lid = block.elem_map.local(gid)
+                rload = RobinLoad(edge=edge_no, H=H, u0=u0)
+                self.rloads[block_no][lid].append(rload)
+
+    def construct_constraints(self, model: Model) -> None:
+        nodes: list[int]
+        dofs: list[int]
+        coeffs: list[float]
+        rhs: float = 0.0
+        for nodes, dofs, coeffs, rhs in self.metadata.get("constraints", {}).values():
+            mpc: list[int | float] = []
+            for gid, dof, coeff in zip(nodes, dofs, coeffs):
+                if gid not in model.node_map:
+                    raise ValueError(f"Node {gid} is not defined")
+                mpc.extend([model.node_map.local(gid), dof, coeff])
+            mpc.append(rhs)
+            self.mpcs.append(mpc)
+
 
 class ModelBuilder:
     def __init__(self, mesh: "Mesh") -> None:
@@ -295,13 +467,6 @@ class ModelBuilder:
         # Meta data to store information needed for one pass mesh assembly
         self.metadata: dict[str, dict] = defaultdict(dict)
 
-        self.dbcs: list[tuple[int, int, NodalFieldEvaluator]] = []
-        self.nbcs: list[tuple[int, int, NodalFieldEvaluator]] = []
-        self.dsloads: DSloadT = defaultdict(lambda: defaultdict(list))
-        self.rloads: RloadT = defaultdict(lambda: defaultdict(list))
-        self.dloads: DloadT = defaultdict(lambda: defaultdict(list))
-        self.mpcs: list[list[int | float]] = []
-
         self.steps: list[Step] = []
 
     def assign_properties(self, *, block: str, element: Element, material: Material) -> None:
@@ -316,205 +481,35 @@ class ModelBuilder:
         else:
             raise ValueError(f"Element block {block!r} is not defined")
 
-    def boundary(
-        self,
-        *,
-        nodeset: str,
-        dofs: int | list[int],
-        amplitude: float | NodalFieldEvaluator = 0.0,
-    ) -> None:
-        if nodeset not in self.mesh.nodesets:
-            raise ValueError(f"nodeset {nodeset} not defined")
-        lids: list[int] = self.mesh.nodesets[nodeset]
-        if isinstance(amplitude, float):
-            amplitude = ConstantNodalField(amplitude)
-        if isinstance(dofs, int):
-            dofs = [dofs]
-        for lid in lids:
-            for dof in dofs:
-                self.dbcs.append((lid, dof, amplitude))
+    def static_step(self, name: str | None = None, period: float = 1.0) -> StaticStepBuilder:
+        steps = self.metadata["steps"]
+        name = name or f"step-{len(steps)}"
+        step = steps[name] = StaticStepBuilder(name=name, period=period)
+        return step
 
-    def static_step(self, name: str | None = None, period: float = 1.0) -> StaticStep:
-        parent = None if not self.steps else self.steps[-1]
-        name = name or f"Step-{len(self.steps) + 1}"
-        return StaticStep(name=name, period=period, parent=parent)
-
-    def point_load(
-        self,
-        *,
-        nodeset: str,
-        dofs: int | list[int],
-        amplitude: float | NodalFieldEvaluator = 0.0,
-    ) -> None:
-        if nodeset not in self.mesh.nodesets:
-            raise ValueError(f"nodeset {nodeset} not defined")
-        lids: list[int] = self.mesh.nodesets[nodeset]
-        if isinstance(amplitude, float):
-            amplitude = ConstantNodalField(amplitude)
-        if isinstance(dofs, int):
-            dofs = [dofs]
-        for lid in lids:
-            for dof in dofs:
-                self.nbcs.append((lid, dof, amplitude))
-
-    def traction(self, *, sideset: str, magnitude: float, direction: Sequence[float]) -> None:
-        if sideset not in self.mesh.sidesets:
-            raise ValueError(f"sideset {sideset} not defined")
-        dsloads = self.metadata["dsloads"]
-        dsloads[f"dsload-{len(dsloads)}"] = ("traction", sideset, magnitude, direction)
-
-    def pressure(self, *, sideset: str, magnitude: float) -> None:
-        if sideset not in self.mesh.sidesets:
-            raise ValueError(f"sideset {sideset} not defined")
-        dsloads = self.metadata["dsloads"]
-        dsloads[f"dsload-{len(dsloads)}"] = ("pressure", sideset, magnitude)
-
-    def robin(self, *, sideset: str, u0: collections.Vector, H: collections.Matrix) -> None:
-        if sideset not in self.mesh.sidesets:
-            raise ValueError(f"sideset {sideset} not defined")
-        rloads = self.metadata["rloads"]
-        rloads[f"rload-{len(rloads)}"] = (sideset, H, u0)
-
-    def gravity(self, *, elemset: str, g: float, direction: Sequence[float]
-    ) -> None:
-        if elemset not in self.mesh.elemsets:
-            raise ValueError(f"element set {elemset} not defined")
-        dloads = self.metadata["dloads"]
-        dloads[f"dload-{len(dloads)}"] = ("gravity", elemset, g, direction)
-
-    def dload(self, *, elemset: str, field: Field) -> None:
-        if elemset not in self.mesh.elemsets:
-            raise ValueError(f"element set {elemset} not defined")
-        dloads = self.metadata["dloads"]
-        dloads[f"dload-{len(dloads)}"] = ("dload", elemset, field)
-
-    def constraint(
-        self,
-        *,
-        nodes: list[int],
-        dofs: list[int],
-        coeffs: list[float],
-        rhs: float = 0.0,
-    ) -> None:
-        if not (len(nodes) == len(dofs) == len(coeffs)):
-            raise ValueError("nodes, dofs, and coeffs must be same length")
-        constraints = self.metadata["constraints"]
-        constraints[f"constraint-{len(constraints)}"] = (nodes, dofs, coeffs, rhs)
-
-    def construct_dloads(self) -> None:
-        if not self.assembled:
-            raise ValueError("Assemble builder before constructing distributed loads")
-        dload: Load
-        for ltype, elemset, *args in self.metadata.get("dloads", {}).values():
-            if ltype == "gravity":
-                g, direction = args
-                dload = GravityLoad(g, direction)
-            elif ltype == "dload":
-                field = args[0]
-                dload = DistributedLoad(field=field)
-            else:
-                raise ValueError(f"Unknown ltype: {ltype}")
-            for lid in self.mesh.elemsets[elemset]:
-                gid = self.mesh.elem_map[lid]
-                block_no = self.mesh.block_elem_map[lid]
-                block = self.mesh.blocks[block_no]
-                e = block.elem_map.local(gid)
-                self.dloads[block_no][e].append(dload)
-
-    def construct_dsloads(self) -> None:
-        if not self.assembled:
-            raise ValueError("Assemble builder before constructing surface loads")
-        sideset: str
-        dsload: DistributedSurfaceLoad
-        for ltype, sideset, *args in self.metadata.get("dsloads", {}).values():
-            if ltype == "traction":
-                magnitude, direction = args
-                dsload = TractionLoad(magnitude=magnitude, direction=direction)
-            elif ltype == "pressure":
-                magnitude = args[0]
-                dsload = PressureLoad(magnitude=magnitude)
-            else:
-                raise ValueError(f"Unknown ltype: {ltype}")
-            for ele_no, edge_no in self.mesh.sidesets[sideset]:
-                block_no = self.mesh.block_elem_map[ele_no]
-                block = self.mesh.blocks[block_no]
-                gid = self.mesh.elem_map[ele_no]
-                lid = block.elem_map.local(gid)
-                self.dsloads[block_no][lid].append((edge_no, dsload))
-
-    def construct_rloads(self) -> None:
-        if not self.assembled:
-            raise ValueError("Assemble builder before constructing Robin conditions")
-        sideset: str
-        u0: collections.Vector
-        H: collections.Vector
-        for sideset, H, u0 in self.metadata.get("rloads", {}).values():
-            for ele_no, edge_no in self.mesh.sidesets[sideset]:
-                block_no = self.mesh.block_elem_map[ele_no]
-                block = self.mesh.blocks[block_no]
-                conn = self.mesh.connect[ele_no]
-                p = self.mesh.coords[conn]
-                x = block.cell_type.edge_centroid(edge_no, p)
-
-                gid = self.mesh.elem_map[ele_no]
-                lid = block.elem_map.local(gid)
-                rload = RobinLoad(
-                    edge=edge_no, H=np.array(H(x.tolist())), u0=np.array(u0(x.tolist()))
-                )
-                self.rloads[block_no][lid].append(rload)
-
-    def construct_constraints(self) -> None:
-        if not self.assembled:
-            raise ValueError("Assemble builder before constructing constraints")
-        nodes: list[int]
-        dofs: list[int]
-        coeffs: list[float]
-        rhs: float = 0.0
-        for nodes, dofs, coeffs, rhs in self.metadata.get("constraints", {}).values():
-            mpc: list[int | float] = []
-            for gid, dof, coeff in zip(nodes, dofs, coeffs):
-                if gid not in self.mesh.node_map:
-                    raise ValueError(f"Node {gid} is not defined")
-                mpc.extend([self.mesh.node_map.local(gid), dof, coeff])
-            mpc.append(rhs)
-            self.mpcs.append(mpc)
-
-    def assemble(self) -> None:
+    def assemble(self) -> Model:
         if self.assembled:
             raise ValueError("ModelBuilder already assembled")
         blocks = {block.name for block in self.mesh.blocks}
         if missing := blocks.difference({block.name for block in self.blocks}):
             raise ValueError(f"The following blocks have not been assigned properties: {missing}")
         self.build_dof_maps()
-        self.assembled = True
-        self.construct_loads()
-        self.construct_constraints()
-
-    def construct_loads(self) -> None:
-        self.construct_dloads()
-        self.construct_dsloads()
-        self.construct_rloads()
-
-    def emit_model(self) -> Model:
-        if not self.assembled:
-            self.assemble()
-        return Model(
-            dof_map=self.dof_map,
-            coords=self.mesh.coords,
-            connect=self.mesh.connect,
+        model = Model(
+            mesh=self.mesh,
             blocks=self.blocks,
             num_dof=self.num_dof,
+            dof_map=self.dof_map,
             block_dof_map=self.block_dof_map,
             node_signatures=self.node_signatures,
-            node_map=self.mesh.node_map,
-            elem_map=self.mesh.elem_map,
-            dirichlet_bcs=self.dbcs,
-            neumann_bcs=self.nbcs,
-            robin_loads=self.rloads,
-            dsloads=self.dsloads,
-            dloads=self.dloads,
-            equations=self.mpcs,
         )
+        b: StepBuilder
+        parent: Step | None = None
+        for b in self.metadata.get("steps", {}).values():
+            step = b.assemble(model, parent=parent)
+            parent = step
+            model.add_step(step)
+        self.assembled = True
+        return model
 
     def build_dof_maps(self) -> None:
         # Build node signatures and dof maps
@@ -564,16 +559,3 @@ class ModelBuilder:
                     dof = block.dof_map[node, local_dof]
                     DOF = self.dof_map[lid, local_dof]
                     self.block_dof_map[b, dof] = DOF
-
-
-@dataclass
-class Mesh:
-    coords: NDArray
-    connect: NDArray
-    blocks: list[TopoBlock]
-    node_map: collections.Map
-    elem_map: collections.Map
-    block_elem_map: dict[int, int]
-    nodesets: dict[str, list[int]] = field(default_factory=dict)
-    sidesets: dict[str, list[tuple[int, int]]] = field(default_factory=dict)
-    elemsets: dict[str, list[int]] = field(default_factory=dict)

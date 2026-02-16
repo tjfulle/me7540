@@ -1,19 +1,16 @@
 from abc import ABC
 from abc import abstractmethod
-from typing import Sequence
 from typing import Any
 from typing import Generator
+from typing import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
 
-from .collections import RobinLoad
-from .collections import DistributedSurfaceLoad
-from .constants import GRAVITY
-from .constants import PRESSURE
-from .constants import TRACTION
-from .material import Material
 from .collections import DistributedLoad
+from .collections import DistributedSurfaceLoad
+from .collections import RobinLoad
+from .material import Material
 
 
 class Element(ABC):
@@ -36,7 +33,6 @@ class Element(ABC):
     @abstractmethod
     def area(self, p: NDArray) -> float: ...
 
-    @property
     @abstractmethod
     def centroid(self, p: NDArray) -> NDArray: ...
 
@@ -112,7 +108,7 @@ class IsoparametricElement(Element):
     def edge_normal(self, edge: int, p: NDArray, xi: float) -> NDArray: ...
 
     @abstractmethod
-    def interpolate_edge(self, p: NDArray, xi: float) -> tuple[float, ...]: ...
+    def interpolate_edge(self, p: NDArray, xi: float) -> NDArray: ...
 
     def centroid(self, p: NDArray) -> NDArray:
         return np.asarray(p).mean(axis=0)
@@ -128,9 +124,9 @@ class IsoparametricElement(Element):
         dNdx = np.dot(np.linalg.inv(dxdxi), dNdxi)
         return dNdx
 
-    def interpolate(self, p: NDArray, xi: NDArray) -> tuple[float, ...]:
+    def interpolate(self, p: NDArray, xi: NDArray) -> NDArray:
         N = self.shape(xi)
-        return tuple(np.dot(N, p[:, i]) for i in range(p.shape[1]))
+        return np.array([np.dot(N, p[:, i]) for i in range(p.shape[1])], dtype=float)
 
     def edge_jacobian(self, edge: int, p: NDArray, xi: float) -> float:
         """
@@ -148,7 +144,7 @@ class IsoparametricElement(Element):
         material: Material,
         step: int,
         increment: int,
-        time: list[float],
+        time: Sequence[float],
         dt: float,
         eleno: int,
         p: NDArray,
@@ -301,11 +297,11 @@ class CPX3(IsoparametricElement):
         n = np.array([t[1], -t[0]])  # rotate tangent
         return n / np.linalg.norm(n)
 
-    def interpolate_edge(self, p: NDArray, xi: float) -> tuple[float, float]:
+    def interpolate_edge(self, p: NDArray, xi: float) -> NDArray:
         xp, yp = p[:, 0], p[:, 1]
         x = 0.5 * (1.0 - xi) * xp[0] + 0.5 * (1 + xi) * xp[1]
         y = 0.5 * (1.0 - xi) * yp[0] + 0.5 * (1 + xi) * yp[1]
-        return x, y
+        return np.array([x, y])
 
 
 class CPS3(CPX3):

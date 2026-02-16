@@ -1,15 +1,15 @@
 import logging
-from typing import Sequence
 from typing import TYPE_CHECKING
+from typing import Sequence
 from typing import Type
 
 import numpy as np
 from numpy.typing import NDArray
 
 from .collections import DistributedLoad
+from .collections import DistributedSurfaceLoad
 from .collections import Map
 from .collections import RobinLoad
-from .collections import DistributedSurfaceLoad
 
 if TYPE_CHECKING:
     from .cell import Cell

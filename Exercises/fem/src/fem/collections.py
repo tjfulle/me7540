@@ -1,14 +1,13 @@
 from abc import ABC
-import numpy as np
 from abc import abstractmethod
 from dataclasses import dataclass
 from dataclasses import field
 from typing import TYPE_CHECKING
 from typing import Any
-from typing import Callable
 from typing import Sequence
 from typing import Type
 
+import numpy as np
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
@@ -21,10 +20,16 @@ class Map:
         self.gid_to_lid = {gid: lid for lid, gid in enumerate(gids)}
 
     def __getitem__(self, lid: int) -> int:
-        return self.lid_to_gid[lid]
+        try:
+            return self.lid_to_gid[lid]
+        except IndexError:
+            raise ValueError(f"Invalid index {lid}") from None
 
     def __contains__(self, gid: int) -> bool:
         return gid in self.lid_to_gid
+
+    def __len__(self) -> int:
+        return len(self.lid_to_gid)
 
     def local(self, gid: int) -> int:
         return self.gid_to_lid[gid]
@@ -32,35 +37,50 @@ class Map:
 
 class Field(ABC):
     @abstractmethod
-    def __call__(self, x: Sequence[float], time: Sequence[float]) -> Any: ...
+    def __call__(self, x: NDArray, time: Sequence[float]) -> Any: ...
 
 
-class ScalarField(ABC):
+class ScalarField(Field):
     @abstractmethod
-    def __call__(self, x: Sequence[float], time: Sequence[float]) -> float: ...
+    def __call__(self, x: NDArray, time: Sequence[float]) -> float: ...
 
 
 class ConstantScalarField(ScalarField):
     def __init__(self, value: float) -> None:
         self.value = value
 
-    def __call__(self, x: Sequence[float], time: Sequence[float]) -> float:
+    def __call__(self, x: NDArray, time: Sequence[float]) -> float:
         return self.value
 
 
-class VectorField(ABC):
+class VectorField(Field):
     @abstractmethod
-    def __call__(self, x: Sequence[float], time: Sequence[float]) -> NDArray: ...
+    def __call__(self, x: NDArray, time: Sequence[float]) -> NDArray: ...
 
 
 class ConstantVectorField(VectorField):
     def __init__(self, magnitude: float, direction: Sequence[float]) -> None:
-        direction = np.asarray(direction, dtype=float)
-        direction /= np.linalg.norm(direction)
-        self.value = magnitude * direction
+        vec = np.asarray(direction, dtype=float)
+        vec /= np.linalg.norm(vec)
+        self.value = magnitude * vec
 
-    def __call__(self, x: Sequence[float], time: Sequence[float]) -> NDArray:
+    def __call__(self, x: NDArray, time: Sequence[float]) -> NDArray:
         return self.value
+
+
+class BoundaryCondition(ABC):
+    @abstractmethod
+    def __call__(
+        self,
+        *,
+        step: int,
+        increment: int,
+        node: int,
+        dof: int,
+        time: list[float],
+        dt: float,
+        x: NDArray,
+    ) -> float: ...
 
 
 class Load(ABC):
@@ -69,13 +89,14 @@ class Load(ABC):
     def field(self) -> Field: ...
 
     @abstractmethod
-    def __call__(self, *args) -> Any: ...
+    def __call__(self, *args: Any) -> Any: ...
 
 
 class DistributedLoad(Load):
     """
     Load integrated over element domain (volume or length).
     """
+
     def __init__(self, field: Field) -> None:
         self._field = field
 
@@ -114,6 +135,7 @@ class DistributedSurfaceLoad(Load):
     """
     Load integrated over element boundary (codim 1).
     """
+
     def __init__(self, field: Field) -> None:
         self._field = field
 
@@ -195,177 +217,26 @@ class PressureLoad(DistributedSurfaceLoad):
         return -self.field(x, time) * n
 
 
-class TractionLoad(DistributedSurfaceLoad):
-    """
-    Mechanical traction applied on element surfaces.
-    """
-
-    def __init__(self, magnitude: float, direction: Sequence[float]) -> None:
-        field = ConstantVectorField(magnitude, direction)
-        super().__init__(field=field)
-
-
-
-class Value(ABC):
-    @abstractmethod
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> Any: ...
-
-
-class Constant(Value):
-    def __init__(self, value: Any) -> None:
-        self.value = value
-
-    def __call__(self, *args: Any) -> Any:
-        return self.value
-
-
-class Vector(ABC):
-    @abstractmethod
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[float]: ...
-
-
-class ConstantVector(Vector):
-    def __init__(self, value: list[float]) -> None:
-        self.value = value
-
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[float]:
-        return self.value
-
-
-class Matrix(ABC):
-    @abstractmethod
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[list[float]]: ...
-
-
-class ConstantMatrix(Matrix):
-    def __init__(self, value: list[list[float]]) -> None:
-        self.value = value
-
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[list[float]]:
-        return self.value
-
-
-class BoundaryCondition(ABC):
-    @abstractmethod
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[tuple[int, float]]: ...
-
-
-class PinnedBoundary(BoundaryCondition):
-    def __init__(self, value: float = 0.0) -> None:
-        self.value = value
-
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[tuple[int, float]]:
-        ndim = len(x)
-        return [(dof, self.value) for dof in range(ndim)]
-
-
-class RollerBoundary(BoundaryCondition):
-    def __init__(self, free_dof: int, value: float = 0.0) -> None:
-        self.free_dof = free_dof
-        self.value = value
-
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[tuple[int, float]]:
-        ndim = len(x)
-        return [(dof, self.value) for dof in range(ndim) if dof != self.free_dof]
-
-
-class PointLoad(BoundaryCondition):
-    def __init__(self, free_dof: int, value: float = 0.0) -> None:
-        self.free_dof = free_dof
-        self.value = value
-
-    def __call__(self, x: Sequence[float], t: float = 0.0) -> list[tuple[int, float]]:
-        ndim = len(x)
-        return [(dof, self.value) for dof in range(ndim) if dof != self.free_dof]
+@dataclass
+class Solution:
+    stiff: NDArray
+    force: NDArray
+    dofs: NDArray
+    react: NDArray
+    iterations: int = field(default=1)
+    lagrange_multipliers: NDArray = field(default_factory=lambda: np.empty((0,)))
 
 
 class RegionSelector(ABC):
     @abstractmethod
-    def __call__(self, x: Sequence[float], on_boundary: bool) -> bool: ...
-
-
-class NodalFieldEvaluator(ABC):
-    @abstractmethod
-    def __call__(
-        self,
-        *,
-        step: int,
-        increment: int,
-        node: int,
-        dof: int,
-        time: list[float],
-        dt: float,
-        x: Sequence[float],
-    ) -> float: ...
-
-
-class ConstantNodalField(NodalFieldEvaluator):
-    def __init__(self, value: float) -> None:
-        self.value = value
-    def __call__(
-        self,
-        *,
-        step: int,
-        increment: int,
-        node: int,
-        dof: int,
-        time: list[float],
-        dt: float,
-        x: Sequence[float],
-    ) -> float:
-        return self.value
-
-
-class ElementFieldEvaluator(ABC):
-    @abstractmethod
-    def __call__(
-        self,
-        step: int,
-        increment: int,
-        element: int,
-        time: list[float],
-        dt: float,
-        x: Sequence[float],
-    ) -> Sequence[float]: ...
-
-
-class ConstantElementField(ElementFieldEvaluator):
-    def __init__(self, magnitude: float, direction: Sequence[float]) -> None:
-        self.magnitude = magnitude
-        self.direction = direction
-    def __call__(
-        self,
-        step: int,
-        increment: int,
-        element: int,
-        time: list[float],
-        dt: float,
-        x: Sequence[float],
-    ) -> Sequence[float]:
-        return [self.magnitude * dir for dir in self.direction]
-
-
-class GravityField(ElementFieldEvaluator):
-    def __init__(self, magnitude: float, direction: Sequence[float]) -> None:
-        self.magnitude = magnitude
-        self.direction = direction
-    def __call__(
-        self,
-        step: int,
-        increment: int,
-        element: int,
-        time: list[float],
-        dt: float,
-        x: Sequence[float],
-    ) -> Sequence[float]:
-        return [self.magnitude * dir for dir in self.direction]
+    def __call__(self, x: NDArray, on_boundary: bool) -> bool: ...
 
 
 @dataclass
 class Node:
     lid: int
     gid: int
-    x: list[float]
+    x: Sequence[float]
     normal: list[float] = field(default_factory=list)
     on_boundary: bool = field(default=False)
 
@@ -374,7 +245,7 @@ class Node:
 class Edge:
     element: int
     edge: int
-    x: list[float]
+    x: Sequence[float]
     normal: list[float]
 
 

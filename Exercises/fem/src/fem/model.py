@@ -6,19 +6,16 @@ import numpy as np
 from numpy.typing import NDArray
 
 from .block import ElementBlock
-from .collections import DistributedLoad
 from .collections import Map
-from .collections import RobinLoad
-from .collections import DistributedSurfaceLoad
-from .collections import NodalFieldEvaluator
+from .mesh import Mesh
+from .step import Step
 
 ArrayLike = NDArray | Sequence
 
 
 @dataclass
 class Model:
-    coords: NDArray
-    connect: NDArray
+    mesh: Mesh
     blocks: list[ElementBlock]
 
     num_dof: int
@@ -26,146 +23,164 @@ class Model:
     block_dof_map: NDArray
     node_signatures: NDArray
 
-    node_map: Map
-    elem_map: Map
+    steps: list[Step] = field(default_factory=list)
 
-    dirichlet_bcs: list[list[int, int, NodalFieldEvaluator]]
-    neumann_bcs: list[list[int, int, NodalFieldEvaluator]]
+    @property
+    def nnode(self) -> int:
+        return self.mesh.coords.shape[0]
 
-    robin_loads: dict[int, dict[int, list[RobinLoad]]]
-    dsloads: dict[int, dict[int, list[tuple[int, DistributedSurfaceLoad]]]]
-    dloads: dict[int, dict[int, list[DistributedLoad]]]
+    @property
+    def nelem(self) -> int:
+        return self.mesh.coords.shape[0]
 
-    equations: list[list[int | float]] = field(default_factory=list)
+    @property
+    def node_map(self) -> Map:
+        return self.mesh.node_map
 
-    nnode: int = field(init=False, default=-1)
-    nelem: int = field(init=False, default=-1)
+    @property
+    def elem_map(self) -> Map:
+        return self.mesh.elem_map
 
-    def __post_init__(self) -> None:
-        self.nnode = self.coords.shape[0]
-        self.nelem = self.connect.shape[0]
+    @property
+    def coords(self) -> NDArray:
+        return self.mesh.coords
 
-    def evaluate_dirichlet_bcs(
-        self, step: int, increment: int, time: list[float], dt: float, u: NDArray
-    ) -> tuple[NDArray, NDArray]:
-        # Evaluate Dirichlet BCs
-        view = u.reshape((self.nnode, -1))
+    @property
+    def connect(self) -> NDArray:
+        return self.mesh.connect
+
+    @property
+    def elemsets(self) -> dict[str, list[int]]:
+        return self.mesh.elemsets
+
+    @property
+    def nodesets(self) -> dict[str, list[int]]:
+        return self.mesh.nodesets
+
+    @property
+    def sidesets(self) -> dict[str, list[tuple[int, int]]]:
+        return self.mesh.sidesets
+
+    @property
+    def block_elem_map(self) -> dict[int, int]:
+        return self.mesh.block_elem_map
+
+    def add_step(self, step: Step) -> None:
+        self.steps.append(step)
+
+    def solve(self) -> None:
+        parent: Step | None = None
+        for step in self.steps:
+            step.initialize(parent)
+            solution = step.solve(self)
+            step.finalize(solution)
+            parent = step
+
+    def evaluate_dirichlet_bcs(self, step: Step) -> tuple[NDArray, NDArray]:
         ddofs: list[int] = []
         dvals: list[float] = []
-        for lid, i, evaluator in self.dirichlet_bcs:
-            dof = self.dof_map[lid, i]
-            gid = self.node_map[lid]
-            val = evaluator(
-                step=step,
-                increment=increment,
-                node=gid,
-                dof=i,
-                x=self.coords[lid] + view[lid],
-                time=time,
-                dt=dt,
+        for lid, ldof, value in step.dbcs:
+            dof = self.dof_map[lid, ldof]
+            ddofs.append(dof)
+            dvals.append(value)
+        return np.asarray(ddofs, dtype=int), np.asarray(dvals, dtype=float)
+
+    def assemble(
+        self, step: Step, increment: int, time: Sequence[float], dt: float, u: NDArray, du: NDArray
+    ) -> tuple[NDArray, NDArray]:
+        K = np.zeros((self.num_dof, self.num_dof), dtype=float)
+        R = np.zeros(self.num_dof, dtype=float)
+        for b, block in enumerate(self.blocks):
+            ix = self.block_dof_map[b]
+            bft = ix[ix != -1]
+            kb, rb = block.assemble(
+                step.number,
+                increment,
+                time,
+                dt,
+                u[bft],
+                du[bft],
+                dloads=step.dloads.get(b),
+                dsloads=step.dsloads.get(b),
+                rloads=step.rloads.get(b),
             )
-            if dof in ddofs:
-                j = ddofs.index(dof)
-                ddofs[j] = dof
-                dvals[j] = val
-            else:
-                ddofs.append(dof)
-                dvals.append(val)
-        return np.array(ddofs), np.array(dvals)
+            K[np.ix_(bft, bft)] += kb
+            R[bft] += rb
+        return K, R
 
+    def build_linear_constraint(
+        self, step: Step, u: NDArray, du: NDArray
+    ) -> tuple[NDArray, NDArray]:
+        """Enforce homogeneous linear constraints using Lagrange multiplier method.
 
-def assemble(model: Model, step: int, increment: int, time: Sequence[float], dt: float, u: NDArray, du: NDArray) -> tuple[NDArray, NDArray]:
-    K = np.zeros((model.num_dof, model.num_dof), dtype=float)
-    R = np.zeros(model.num_dof, dtype=float)
-    for b, block in enumerate(model.blocks):
-        ix = model.block_dof_map[b]
-        bft = ix[ix != -1]
-        kb, rb = block.assemble(
-            step,
-            increment,
-            time,
-            dt,
-            u[bft],
-            du[bft],
-            dloads=model.dloads.get(b),
-            dsloads=model.dsloads.get(b),
-            rloads=model.robin_loads.get(b),
-        )
-        K[np.ix_(bft, bft)] += kb
-        R[bft] += rb
-    return K, R
+        Procuedure
+        ----------
 
+        The standard augmented Lagrange system for a set of linear constraints
 
-def build_linear_constraint(model: Model, u: NDArray, du: NDArray) -> tuple[NDArray, NDArray]:
-    """Enforce homogeneous linear constraints using Lagrange multiplier method.
+            C.u = r
 
-    Procuedure
-    ----------
+        is written as
 
-    The standard augmented Lagrange system for a set of linear constraints
+            ⎡ K   C.T⎤ ⎧ u ⎫   ⎧ F ⎫
+            ⎢        ⎥ ⎨   ⎬ = ⎨   ⎬
+            ⎣ C    0 ⎦ ⎩ 𝜆 ⎭   ⎩ r ⎭
 
-        C.u = r
+        where:
+        - K is the global stiffness
+        - C is the constraint matrix
+        - 𝜆 are the Lagrange multipliers enforcing the constraings
+        - F is the external force vector
+        - r is the rhs of the constraint.
 
-    is written as
+        If any DOFs participating in the constraint equations are prescribed (known), they must be
+        eliminated before assembling the augmented system.
 
-        ⎡ K   C.T⎤ ⎧ u ⎫   ⎧ F ⎫
-        ⎢        ⎥ ⎨   ⎬ = ⎨   ⎬
-        ⎣ C    0 ⎦ ⎩ 𝜆 ⎭   ⎩ r ⎭
+        For example, if
 
-    where:
-    - K is the global stiffness
-    - C is the constraint matrix
-    - 𝜆 are the Lagrange multipliers enforcing the constraings
-    - F is the external force vector
-    - r is the rhs of the constraint.
+            u_1 - u_5 = 0
 
-    If any DOFs participating in the constraint equations are prescribed (known), they must be
-    eliminated before assembling the augmented system.
+        and u_1 is prescribed (∆), this becomes:
 
-    For example, if
+            -u_5 = -∆
 
-        u_1 - u_5 = 0
+        The corresponding row of C has the column for DOF 1 zeroed and r modified by -C[i, 1] * ∆
 
-    and u_1 is prescribed (∆), this becomes:
+        The augmented system becomes
 
-        -u_5 = -∆
+            ⎡ K_ff   C_f.T⎤ ⎧ u_f ⎫   ⎧ F_f ⎫
+            ⎢             ⎥ ⎨     ⎬ = ⎨     ⎬
+            ⎣ C_f     0   ⎦ ⎩  𝜆  ⎭   ⎩  r  ⎭
 
-    The corresponding row of C has the column for DOF 1 zeroed and r modified by -C[i, 1] * ∆
+        """
+        m = len(step.equations)
+        if not m:
+            return np.empty(0), np.empty(0)
 
-    The augmented system becomes
+        # Build the linear constrain matrix
+        m = len(step.equations)
+        n = self.num_dof
 
-        ⎡ K_ff   C_f.T⎤ ⎧ u_f ⎫   ⎧ F_f ⎫
-        ⎢             ⎥ ⎨     ⎬ = ⎨     ⎬
-        ⎣ C_f     0   ⎦ ⎩  𝜆  ⎭   ⎩  r  ⎭
+        C: NDArray = np.zeros(shape=(m, n), dtype=float)
+        r: NDArray = np.zeros(shape=m, dtype=float)
 
-    """
-    m = len(model.equations)
-    if not m:
-        return np.empty(0), np.empty(0)
+        for i, equation in enumerate(step.equations):
+            rhs = equation[-1]
+            for j in range(0, len(equation[:-1]), 3):
+                node = int(equation[j])
+                dof = int(equation[j + 1])
+                coeff = float(equation[j + 2])
+                I = self.dof_map[node, dof]
+                C[i, I] = coeff
+            r[i] = rhs
 
-    # Build the linear constrain matrix
-    m = len(model.equations)
-    n = model.num_dof
+        # Gather prescribed DOFs and values
+        for i, row in enumerate(C):
+            for lid, ldof, value in step.dbcs:
+                dof = self.dof_map[lid, ldof]
+                coeff = row[dof]
+                if abs(coeff) > 0.0:
+                    r[i] -= coeff * (value - u[dof])
+                    row[dof] = 0.0
 
-    C: NDArray = np.zeros(shape=(m, n), dtype=float)
-    r: NDArray = np.zeros(shape=m, dtype=float)
-
-    for i, equation in enumerate(model.equations):
-        rhs = equation[-1]
-        for j in range(0, len(equation[:-1]), 3):
-            node = int(equation[j])
-            dof = int(equation[j + 1])
-            coeff = float(equation[j + 2])
-            I = model.dof_map[node, dof]
-            C[i, I] = coeff
-        r[i] = rhs
-
-    # Gather prescribed DOFs and values
-    for i, row in enumerate(C):
-        for dof, val in zip(model.dirichlet_dofs, model.dirichlet_vals):
-            coeff = row[dof]
-            if abs(coeff) > 0.0:
-                r[i] -= coeff * (val - u[dof])
-                row[dof] = 0.0
-
-    return C, r
+        return C, r

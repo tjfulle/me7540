@@ -1,78 +1,71 @@
 from abc import ABC
 from abc import abstractmethod
-from dataclasses import dataclass
-from dataclasses import field
+from typing import TYPE_CHECKING
 from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from .collections import NodalFieldEvaluator
-from . import model
+from .collections import Solution
 
-
-@dataclass
-class Solution:
-    stiff: NDArray
-    force: NDArray
-    dofs: NDArray
-    react: NDArray
-    iterations: int = field(default=1)
-    lagrange_multipliers: NDArray = field(default_factory=lambda: np.empty((0,)))
+if TYPE_CHECKING:
+    from .model import Model
+    from .step import Step
 
 
 class Solver(ABC):
     @abstractmethod
-    def __call__(self, mod: model.Model) -> Solution: ...
+    def __call__(self, model: "Model", step: "Step") -> Solution: ...
 
 
 class DirectSolver(Solver):
-    def __call__(self, mod: model.Model) -> Solution:
-        """Solve the 2D plane stress/strain problem
-
-        Args:
-            model: Model
-
-        Returns:
-            d: nodal displacements returned with shape (nnode, 2)
-            r: nodal reactions (including Neumann terms) returned with shape (nnode, 2)
-
-        """
-        n = mod.num_dof
-        m = len(mod.equations)
+    def __call__(self, model: "Model", step: "Step") -> Solution:
+        """Solve the 2D plane stress/strain problem"""
+        n = model.num_dof
+        m = len(step.equations)
         u = np.zeros(n)
         du = np.zeros(n)
+        lam = np.zeros(m)
+
         K: NDArray = np.zeros((n + m, n + m), dtype=float)
         R: NDArray = np.zeros(n + m, dtype=float)
 
-        K[:n, :n], R[:n] = model.assemble(mod, 1, 1, [0.0, 0.0], 1.0, u, du)
+        time = [step.start, 0.0]
+        dt = step.period
 
-        if mod.equations:
-            C, r = model.build_linear_constraint(mod, u, du)
+        ddofs, dvals = model.evaluate_dirichlet_bcs(step)
+        fdofs = np.array(sorted(set(range(n)).difference(ddofs)), dtype=int)
+
+        K[:n, :n], R[:n] = model.assemble(step, 1, time, dt, u, du)
+
+        if step.equations:
+            C, r = model.build_linear_constraint(step, u, du)
             K[:n, n:] = C.T
             K[n:, :n] = C
             R[n:] = r
 
         # Condense out Dirichlet DOFs and solve condensed system
-        ddofs, dvals = mod.evaluate_dirichlet_bcs(1, 1, [0.0, 0.0], 1.0, u)
-        fdofs = np.array(sorted(set(range(n)).difference(ddofs)), dtype=int)
-        d = np.zeros(n + m)
-        d[ddofs] = dvals
-        d[fdofs] = np.linalg.solve(
-            K[np.ix_(fdofs, fdofs)], -R[fdofs] - np.dot(K[np.ix_(fdofs, ddofs)], d[ddofs])
+        delta = np.zeros(n + m)
+        delta[fdofs] = np.linalg.solve(
+            K[np.ix_(fdofs, fdofs)], -R[fdofs] - np.dot(K[np.ix_(fdofs, ddofs)], dvals)
         )
 
+        u[ddofs] = dvals
+        u[fdofs] += delta[fdofs]
+        if m:
+            lam = delta[n:]
+
         react = np.zeros_like(R[:n])
-        du = np.zeros_like(u)
-        K[:n, :n], R[:n] = model.assemble(mod, 1, 1, [0.0, 0.0], 1.0, d, du)
+        K[:n, :n], R[:n] = model.assemble(step, 1, time, dt, u, du)
         react[ddofs] = np.dot(K[np.ix_(ddofs, ddofs)], u[ddofs]) - R[:n][ddofs]
 
         solution = Solution(
             stiff=K[:n, :n],
             force=R[:n],
-            dofs=d[:n].reshape((mod.nnode, -1)),
-            react=react[:n].reshape((mod.nnode, -1)),
-            lagrange_multipliers=react[n:],
+            dofs=u[:n].reshape((model.nnode, -1)),
+            react=react[:n].reshape((model.nnode, -1)),
+            lagrange_multipliers=lam,
+            iterations=1,
         )
         return solution
 
@@ -83,9 +76,9 @@ class NonlinearNewtonSolver(Solver):
         self.rtol: float = options.get("relative tolerance", 1e-8)
         self.maxiter: int = options.get("max iterations", 25)
 
-    def __call__(self, mod: model.Model) -> Solution:
-        n = mod.num_dof
-        m = len(mod.equations)
+    def __call__(self, model: "Model", step: "Step") -> Solution:
+        n = model.num_dof
+        m = len(step.equations)
 
         u = np.zeros(n, dtype=float)
         du = np.zeros(n, dtype=float)
@@ -96,9 +89,10 @@ class NonlinearNewtonSolver(Solver):
         R0 = 1.0
 
         it = 0
+        time = [step.start, 0.0]
+        dt = step.period
         while it < self.maxiter:
-
-            ddofs, dvals = mod.evaluate_dirichlet_bcs(1, 1, [0.0, 0.0], 1.0, u)
+            ddofs, dvals = model.evaluate_dirichlet_bcs(step)
             fdofs = np.array(sorted(set(range(n)).difference(ddofs)), dtype=int)
 
             it += 1
@@ -106,10 +100,10 @@ class NonlinearNewtonSolver(Solver):
             K.fill(0.0)
             R.fill(0.0)
 
-            K[:n, :n], R[:n] = model.assemble(mod, 1, 1, [0.0, 0.0], 1.0, u, du)
+            K[:n, :n], R[:n] = model.assemble(step, 1, time, dt, u, du)
 
-            if mod.equations:
-                C, r = model.build_linear_constraint(mod, u, du)
+            if step.equations:
+                C, r = model.build_linear_constraint(step, u, du)
                 K[:n, n:] = C.T
                 K[n:, :n] = C
                 R[n:] = r
@@ -140,15 +134,15 @@ class NonlinearNewtonSolver(Solver):
 
         react = np.zeros_like(R[:n])
         du = np.zeros_like(u)
-        K[:n, :n], R[:n] = model.assemble(mod, 1, 1, [0.0, 0.0], 1.0, u, du)
+        K[:n, :n], R[:n] = model.assemble(step, 1, time, dt, u, du)
         react = np.zeros(n)
         react[ddofs] = np.dot(K[np.ix_(ddofs, ddofs)], u[ddofs]) - R[:n][ddofs]
 
         solution = Solution(
             stiff=K[:n, :n],
             force=R[:n],
-            dofs=u[:n].reshape((mod.nnode, -1)),
-            react=react.reshape((mod.nnode, -1)),
+            dofs=u[:n].reshape((model.nnode, -1)),
+            react=react.reshape((model.nnode, -1)),
             lagrange_multipliers=lam,
             iterations=it - 1,  # return only nonlinear iterations
         )
