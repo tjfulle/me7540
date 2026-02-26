@@ -1,10 +1,7 @@
 from abc import ABC
 from abc import abstractmethod
-from typing import Any
-from typing import Generator
 from typing import Sequence
 
-import numpy as np
 from numpy.typing import NDArray
 
 from ..collections import DistributedLoad

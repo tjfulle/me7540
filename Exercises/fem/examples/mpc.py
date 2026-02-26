@@ -1,10 +1,10 @@
-import argparse
 import sys
 from typing import Sequence
 
 import numpy as np
 
 import fem
+
 X = fem.X
 Y = fem.Y
 
@@ -13,6 +13,7 @@ def mpc():
     class Everywhere(fem.collections.RegionSelector):
         def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
             return True
+
     nodes = [[1, 0.0, 0.0], [2, 1.0, 0.0], [3, 1.0, 1.0], [4, 0.0, 1.0], [5, 0.5, 0.5]]
     elements = [[1, 1, 2, 5], [2, 2, 3, 5], [3, 3, 4, 5], [4, 4, 1, 5]]
     mesh_builder = fem.builder.MeshBuilder(nodes=nodes, elements=elements)

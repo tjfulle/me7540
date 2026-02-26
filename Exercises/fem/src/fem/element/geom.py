@@ -5,8 +5,6 @@ from numpy.typing import NDArray
 class Pn:
     edges: NDArray
     ref_coords: NDArray
-    gauss_pts: NDArray
-    gauss_wts: NDArray
 
     # Geometry-only methods
     def shape(self, xi: NDArray) -> NDArray:
@@ -77,11 +75,6 @@ class P3(Pn):
     family = "TRI3"
     edges = np.array([[0, 1], [1, 2], [2, 0]], dtype=int)
     ref_coords = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=float)
-    gauss_pts = np.array([[1.0, 1.0], [4.0, 1.0], [1.0, 4.0]], dtype=float) / 6.0
-    gauss_wts = np.array([1.0, 1.0, 1.0], dtype=float) / 6.0
-
-    edge_gauss_pts = np.array([-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)])
-    edge_gauss_wts = np.array([1.0, 1.0])
 
     def shape(self, xi: NDArray) -> NDArray:
         s, t = xi
@@ -93,5 +86,53 @@ class P3(Pn):
     def area(self, p: NDArray) -> float:
         xp, yp = p[:, 0], p[:, 1]
         d = xp[0] * (yp[1] - yp[2]) + xp[1] * (yp[2] - yp[0]) + xp[2] * (yp[0] - yp[1])
+        assert d > 0
+        return d / 2.0
+
+
+class P4(Pn):
+    """Linear 4-node quad
+
+    Notes
+    -----
+    Node and element face numbering
+
+               [2]
+            3-------2
+            |       |
+       [3]  |       | [1]
+            |       |
+            0-------1
+               [0]
+
+    """
+
+    family = "QUAD4"
+    edges = np.array([[0, 1], [1, 2], [2, 3], [3, 0]], dtype=int)
+    ref_coords = np.array([[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]], dtype=float)
+
+    def shape(self, xi: NDArray) -> NDArray:
+        s, t = xi
+        a = np.array(
+            [
+                (1.0 - s) * (1.0 - t),
+                (1.0 + s) * (1.0 - t),
+                (1.0 + s) * (1.0 + t),
+                (1.0 - s) * (1.0 + t),
+            ]
+        )
+        return a / 4.0
+
+    def shapegrad(self, xi):
+        s, t = xi
+        a = np.array(
+            [[-1.0 + t, 1.0 - t, 1.0 + t, -1.0 - t], [-1.0 + s, -1.0 - s, 1.0 + s, 1.0 - s]]
+        )
+        return a / 4.0
+
+    def area(self, p: NDArray) -> float:
+        xp, yp = p[:, 0], p[:, 1]
+        d = (xp[0] * yp[1] - xp[1] * yp[0]) + (xp[1] * yp[2] - xp[2] * yp[1])
+        d += (xp[2] * yp[3] - xp[3] * yp[2]) + (xp[3] * yp[0] - xp[0] * yp[3])
         assert d > 0
         return d / 2.0

@@ -14,7 +14,7 @@ def exercise(esize: float = 0.05):
 
     class Inside(fem.collections.RegionSelector):
         def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
-            if on_boundary and abs(x[0]) < .8 and abs(x[1]) < .8:
+            if on_boundary and abs(x[0]) < 0.8 and abs(x[1]) < 0.8:
                 return True
             return False
 

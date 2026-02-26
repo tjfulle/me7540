@@ -339,9 +339,9 @@ class StaticStepBuilder(StepBuilder):
         dofs: list[int] = []
         coeffs: list[float] = []
         for i in range(0, len(triples), 3):
-            nodes.append(triples[i])
-            dofs.append(triples[i + 1])
-            coeffs.append(triples[i + 2])
+            nodes.append(int(triples[i]))
+            dofs.append(int(triples[i + 1]))
+            coeffs.append(float(triples[i + 2]))
         constraints[f"constraint-{len(constraints)}"] = (nodes, dofs, coeffs, rhs)
 
     def build(self, model: Model, parent: Step | None) -> StaticStep:

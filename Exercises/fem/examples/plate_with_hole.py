@@ -5,6 +5,7 @@ from typing import Sequence
 import numpy as np
 
 import fem
+
 X = fem.X
 Y = fem.Y
 
@@ -39,7 +40,7 @@ def exercise(esize: float = 0.05):
     builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=m)
     step = builder.static_step()
     step.boundary(nodeset="Top", dofs=[X, Y], value=0.0)
-    step.traction(sideset="Bottom", magnitude=500e3, direction=[4/5, -3/5])
+    step.traction(sideset="Bottom", magnitude=500e3, direction=[4 / 5, -3 / 5])
     step.gravity(elemset="All", g=9.81, direction=[0, -1])
     model = builder.build()
     model.solve()
