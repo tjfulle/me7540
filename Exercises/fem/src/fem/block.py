@@ -1,5 +1,6 @@
 import logging
 from typing import TYPE_CHECKING
+from typing import Generator
 from typing import Sequence
 from typing import Type
 
@@ -86,9 +87,9 @@ class ElementBlock:
         # dof_map[node, dof] -> block (global) dof
         self.dof_map = np.arange(self.num_dof, dtype=int).reshape(self.num_nodes, -1)
 
-        self.pdata: NDArray = np.zeros(
-            (2, self.connect.shape[0], self.element.npts, self.element.ndir + self.element.nshr)
-        )
+        # Integration point data
+        nvars = len(self.element.history_variables())
+        self.pdata: NDArray = np.zeros((2, self.connect.shape[0], self.element.npts, nvars))
 
     @classmethod
     def from_topo_block(
@@ -109,6 +110,17 @@ class ElementBlock:
         nft = self.element.node_freedom_table[0]
         return tuple([int(i) for i, x in enumerate(nft) if x])
 
+    def advance_state(self) -> None:
+        self.pdata[0, :] = self.pdata[1, :]
+
+    def element_variable_names(self) -> list[str]:
+        return self.element.history_variables()
+
+    def element_variable_values(self) -> Generator[tuple[str, NDArray], None, None]:
+        v = self.pdata[1].mean(axis=1)
+        for i, name in enumerate(self.element_variable_names()):
+            yield name, v[:, i]
+
     def assemble(
         self,
         step: int,
@@ -121,6 +133,7 @@ class ElementBlock:
         dsloads: dict[int, list[tuple[int, DistributedSurfaceLoad]]] | None = None,
         rloads: dict[int, list[RobinLoad]] | None = None,
     ) -> tuple[NDArray, NDArray]:
+        self.pdata[1, :] = self.pdata[0, :]
         K = np.zeros((self.num_dof, self.num_dof), dtype=float)
         R = np.zeros(self.num_dof, dtype=float)
         dloads = dloads or {}
@@ -129,8 +142,6 @@ class ElementBlock:
         for e, nodes in enumerate(self.connect):
             eleno = self.elem_map[e]
             eft = self.element_freedom_table(nodes)
-            ue = u[eft]
-            xe = self.coords[nodes]
             ke, re = self.element.eval(
                 self.material,
                 step,
@@ -138,8 +149,10 @@ class ElementBlock:
                 time,
                 dt,
                 eleno,
-                xe,
-                ue,
+                self.coords[nodes],
+                u[eft],
+                du[eft],
+                self.pdata[1, e],
                 dloads=dloads.get(e),
                 dsloads=dsloads.get(e),
                 rloads=rloads.get(e),

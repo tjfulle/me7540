@@ -16,6 +16,7 @@ dependencies = [
     "distmeshpy",
     "scipy",
     "numpy",
+    "exodusii @ git+https://github.com/sandialabs/exodusii",
 ]
 requires-python = ">=3.10"
 classifiers = [
@@ -84,6 +85,10 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = "numpy.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "exodusii.*"
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

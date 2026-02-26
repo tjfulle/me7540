@@ -9,38 +9,25 @@ X = fem.X
 Y = fem.Y
 
 
-def exercise(esize: float = 0.05):
+def mpc():
     class Everywhere(fem.collections.RegionSelector):
         def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
             return True
-
-    class Top(fem.collections.RegionSelector):
-        def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
-            if on_boundary and x[1] > 0.999:
-                return True
-            return False
-
-    class Bottom(fem.collections.RegionSelector):
-        def __call__(self, x: Sequence[float], on_boundary: bool) -> bool:
-            if on_boundary and x[1] < -0.999:
-                return True
-            return False
-
-    nodes, elements = fem.meshing.plate_with_hole(esize=esize)
+    nodes = [[1, 0.0, 0.0], [2, 1.0, 0.0], [3, 1.0, 1.0], [4, 0.0, 1.0], [5, 0.5, 0.5]]
+    elements = [[1, 1, 2, 5], [2, 2, 3, 5], [3, 3, 4, 5], [4, 4, 1, 5]]
     mesh_builder = fem.builder.MeshBuilder(nodes=nodes, elements=elements)
     mesh_builder.block(name="Block-1", region=Everywhere(), cell_type=fem.cell.Tri3)
-    mesh_builder.nodeset("Top", region=Top())
-    mesh_builder.sideset("Bottom", region=Bottom())
-    mesh_builder.elemset("All", region=Everywhere())
+    mesh_builder.nodeset("Boundary", nodes=[1, 2, 3, 4])
+    mesh_builder.nodeset("5", nodes=[5])
     mesh = mesh_builder.build()
 
     m = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
     builder = fem.builder.ModelBuilder(mesh, name="plate_with_hole")
     builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=m)
     step = builder.static_step()
-    step.boundary(nodeset="Top", dofs=[X, Y], value=0.0)
-    step.traction(sideset="Bottom", magnitude=500e3, direction=[4/5, -3/5])
-    step.gravity(elemset="All", g=9.81, direction=[0, -1])
+    step.boundary(nodeset="Boundary", dofs=[X, Y], value=0.0)
+    step.point_load(nodeset="5", dofs=[1], value=-1e3)
+    step.equation(5, X, 1.0, 5, 1, -1.0, 0.0)
     model = builder.build()
     model.solve()
 
@@ -53,10 +40,7 @@ def exercise(esize: float = 0.05):
 
 
 def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("-s", type=float, default=0.05, help="Element size [default: %(default)s]")
-    args = p.parse_args()
-    exercise(esize=args.s)
+    mpc()
     return 0
 
 

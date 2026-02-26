@@ -24,18 +24,18 @@ def exercise(esize: float = 0.05):
     mesh_builder.nodeset("Point", region=lambda x, on_boundary: abs(x[0]) < 0.05 and x[1] > 0.999)
     mesh_builder.nodeset("Top", region=lambda x, on_boundary: x[1] > 0.99)
     mesh_builder.sideset("Bottom", region=Bottom())
-    mesh = mesh_builder.emit_mesh()
+    mesh = mesh_builder.build()
 
-    builder = fem.builder.ModelBuilder(mesh)
+    builder = fem.builder.ModelBuilder(mesh, name="uniaxial_stress")
     material = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
     builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=material)
     step = builder.static_step()
     step.boundary(nodeset="Point", dofs=[0, 1], value=0.0)
     step.boundary(nodeset="Top", dofs=[1], value=0.0)
     step.traction(sideset="Bottom", magnitude=1e8, direction=[0, -1])
-    model = builder.assemble()
+    model = builder.build()
     model.solve()
-    solution = model.steps[0].solution
+    solution = model.steps[-1].solution
 
     u = solution.dofs
     U = np.linalg.norm(u, axis=1)

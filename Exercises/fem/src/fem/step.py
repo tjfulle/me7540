@@ -109,6 +109,8 @@ class DirectStep(Step):
         # We solve directly for total displacement.
         model.u[1, :] = model.u[0, :]
         K, R = model.assemble(self, 1, [0.0, self.start], self.period, model.u[1], np.zeros(n))
+        for dof, value in self.nbcs:
+            R[dof] -= value
 
         # Enforce Dirichlet DOFs strongly
         u = model.u[1].copy()
@@ -131,7 +133,7 @@ class DirectStep(Step):
             # ------------------------------------------
             # Linear constraint system
             # ------------------------------------------
-            C, r = model.build_linear_constraint(self, u, du=np.zeros_like(u))
+            C, r = build_linear_constraint(model.num_dof, self.equations)
             C_f = C[:, fdofs]
             g = np.dot(C, u) - r
             Ka = np.block([[K_ff, C_f.T], [C_f, np.zeros((neq, neq))]])
@@ -142,16 +144,17 @@ class DirectStep(Step):
         # Construct final displacement
         # -------------------------------------------------
 
-        model.u[1, :] = model.u[0, :]
         model.u[1, fdofs] = state.x[:nf]
         model.u[1, ddofs] = dvals
 
         # Reassemble to compute reactions
         K, R = model.assemble(self, 1, [0.0, self.start], self.period, model.u[1], np.zeros(n))
+        for dof, value in self.nbcs:
+            R[dof] -= value
         react = np.zeros_like(R)
         react[ddofs] = R[ddofs]
 
-        return Solution(
+        self.solution = Solution(
             stiff=K[:n, :n],
             force=R[:n],
             dofs=model.u[1, :n].reshape((model.nnode, -1)),
@@ -159,6 +162,7 @@ class DirectStep(Step):
             lagrange_multipliers=state.x[nf:],
             iterations=1,
         )
+        return self.solution
 
 
 @dataclass
@@ -269,16 +273,20 @@ class StaticStep(Step):
             time = [0, step.start]
             dt = step.period
             K, R = model.assemble(step, 1, time, dt, model.u[1], du)
+            for dof, value in self.nbcs:
+                R[dof] -= value
             R_f = R[fdofs]
             K_ff = K[np.ix_(fdofs, fdofs)]
 
             if neq == 0:
                 return K_ff, R_f
 
-            C, r = model.build_linear_constraint(step, model.u[1], du)
+            C, r = build_linear_constraint(model.num_dof, self.equations)
             C_f = C[:, fdofs]
             g = np.dot(C, model.u[1]) - r
             Ka = np.block([[K_ff, C_f.T], [C_f, np.zeros((neq, neq))]])
+            print(x.shape)
+            print(C.shape)
             Ra = np.hstack([R_f + np.dot(C_f.T, x[nf:]), g])
             return Ka, Ra
 
@@ -290,7 +298,7 @@ class StaticStep(Step):
         solver = NonlinearNewtonSolver()
         state = solver(
             fun,
-            model.u[0, fdofs],
+            x0,
             args=(model, self),
             atol=self.solver_options.get("atol"),
             rtol=self.solver_options.get("rtol"),
@@ -301,9 +309,11 @@ class StaticStep(Step):
         K, R = model.assemble(
             self, 1, [0, self.start], self.period, model.u[1], model.u[1] - model.u[0]
         )
+        for dof, value in self.nbcs:
+            R[dof] -= value
         react = np.zeros_like(R)
         react[ddofs] = R[ddofs]
-        solution = Solution(
+        self.solution = Solution(
             stiff=K[:n, :n],
             force=R[:n],
             dofs=model.u[1, :n].reshape((model.nnode, -1)),
@@ -312,4 +322,66 @@ class StaticStep(Step):
             iterations=state.iterations,
         )
 
-        return solution
+        return self.solution
+
+
+def build_linear_constraint(n: int, equations: list[list]) -> tuple[NDArray, NDArray]:
+    """Enforce homogeneous linear constraints using Lagrange multiplier method.
+
+    Procuedure
+    ----------
+
+    The standard augmented Lagrange system for a set of linear constraints
+
+        C.u = r
+
+    is written as
+
+        ⎡ K   C.T⎤ ⎧ u ⎫   ⎧ F ⎫
+        ⎢        ⎥ ⎨   ⎬ = ⎨   ⎬
+        ⎣ C    0 ⎦ ⎩ 𝜆 ⎭   ⎩ r ⎭
+
+    where:
+    - K is the global stiffness
+    - C is the constraint matrix
+    - 𝜆 are the Lagrange multipliers enforcing the constraings
+    - F is the external force vector
+    - r is the rhs of the constraint.
+
+    If any DOFs participating in the constraint equations are prescribed (known), they must be
+    eliminated before assembling the augmented system.
+
+    For example, if
+
+        u_1 - u_5 = 0
+
+    and u_1 is prescribed (∆), this becomes:
+
+        -u_5 = -∆
+
+    The corresponding row of C has the column for DOF 1 zeroed and r modified by -C[i, 1] * ∆
+
+    The augmented system becomes
+
+        ⎡ K_ff   C_f.T⎤ ⎧ u_f ⎫   ⎧ F_f ⎫
+        ⎢             ⎥ ⎨     ⎬ = ⎨     ⎬
+        ⎣ C_f     0   ⎦ ⎩  𝜆  ⎭   ⎩  r  ⎭
+
+    """
+    m = len(equations)
+    if not m:
+        return np.empty(0), np.empty(0)
+
+    # Build the linear constrain matrix
+    C: NDArray = np.zeros(shape=(m, n), dtype=float)
+    r: NDArray = np.zeros(shape=m, dtype=float)
+
+    for i, equation in enumerate(equations):
+        rhs = equation[-1]
+        for j in range(0, len(equation[:-1]), 2):
+            dof = int(equation[j])
+            coeff = float(equation[j + 1])
+            C[i, dof] = coeff
+        r[i] = rhs
+
+    return C, r

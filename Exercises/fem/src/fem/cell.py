@@ -59,7 +59,7 @@ class Tri3(Cell):
         centroid = np.mean(p, axis=0)
         midpoint = 0.5 * (p[na] + p[nb])
         if np.dot(normal, centroid - midpoint) > 0:
-            normal = -normal
+            normal *= -1.0
         return normal / np.linalg.norm(normal)
 
     @staticmethod

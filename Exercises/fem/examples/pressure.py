@@ -25,16 +25,16 @@ def exercise(esize: float = 0.05):
     mesh_builder.nodeset("Top Right", region=lambda x, on_boundary: x[0] > 0.99 and x[1] > 0.99)
     mesh_builder.sideset("Inside", region=Inside())
     mesh_builder.elemset("All", region=Everywhere())
-    mesh = mesh_builder.emit_mesh()
+    mesh = mesh_builder.build()
 
     material = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
-    builder = fem.builder.ModelBuilder(mesh)
+    builder = fem.builder.ModelBuilder(mesh, name="Pressure")
     builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=material)
     step = builder.static_step()
     step.boundary(nodeset="Top Right", dofs=[1], value=0.0)
     step.boundary(nodeset="Top Left", dofs=[0, 1], value=0.0)
     step.pressure(sideset="Inside", magnitude=500e3)
-    model = builder.assemble()
+    model = builder.build()
     model.solve()
     solution = model.steps[0].solution
 

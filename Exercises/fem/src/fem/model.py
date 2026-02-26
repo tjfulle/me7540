@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from typing import Sequence
 
+import exodusii
 import numpy as np
 from numpy.typing import NDArray
 
@@ -15,6 +16,7 @@ ArrayLike = NDArray | Sequence
 
 @dataclass
 class Model:
+    name: str
     mesh: Mesh
     blocks: list[ElementBlock]
 
@@ -26,12 +28,10 @@ class Model:
     steps: list[Step] = field(default_factory=list)
     u: NDArray = field(init=False)
     R: NDArray = field(init=False)
-    ndata: NDArray = field(init=False)
 
     def __post_init__(self) -> None:
         self.u = np.zeros((2, self.num_dof), dtype=float)
         self.R = np.zeros((2, self.num_dof), dtype=float)
-        self.ndata = np.zeros((2, self.coords.shape[0], self.coords.shape[1]), dtype=float)
 
     @property
     def nnode(self) -> int:
@@ -77,8 +77,46 @@ class Model:
         self.steps.append(step)
 
     def solve(self) -> None:
-        for step in self.steps:
-            step.solution = step.solve(self)
+        fname = "_".join(self.name.split()) + ".exo"
+        file = exodusii.exo_file(fname, mode="w")
+        file.put_init(
+            f"fem solution for {self.name}",
+            num_dim=2,
+            num_nodes=self.coords.shape[0],
+            num_elem=self.connect.shape[0],
+            num_elem_blk=len(self.blocks),
+            num_node_sets=len(self.mesh.nodesets),
+            num_side_sets=len(self.mesh.sidesets),
+        )
+        file.put_node_variable_params(2)
+        file.put_coords(self.coords)
+        file.put_node_variable_names(["displx", "disply"])
+        for i, block in enumerate(self.blocks):
+            file.put_element_block(
+                i + 1,
+                block.element.family,
+                num_block_elems=block.connect.shape[0],
+                num_nodes_per_elem=block.element.nnode,
+                num_faces_per_elem=1,
+                num_edges_per_elem=3,
+            )
+            file.put_element_conn(i + 1, block.connect + 1)
+            file.put_element_block_name(i + 1, f"Block-{i + 1}")
+            elem_vars = block.element_variable_names()
+            file.put_element_variable_params(len(elem_vars))
+            file.put_element_variable_names(elem_vars)
+        for i, step in enumerate(self.steps):
+            step.solve(self)
+            self.u[0, :] = self.u[1, :]
+            for block in self.blocks:
+                block.advance_state()
+            file.put_time(i + 1, step.start + step.period)
+            disp = self.u[0].reshape((self.nnode, -1))
+            file.put_node_variable_values(i + 1, "displx", disp[:, 0])
+            file.put_node_variable_values(i + 1, "disply", disp[:, 1])
+            for j, block in enumerate(self.blocks):
+                for name, value in block.element_variable_values():
+                    file.put_element_variable_values(i + 1, j + 1, name, value)
 
     def assemble(
         self, step: Step, increment: int, time: Sequence[float], dt: float, u: NDArray, du: NDArray
@@ -102,77 +140,3 @@ class Model:
             K[np.ix_(bft, bft)] += kb
             R[bft] += rb
         return K, R
-
-    def build_linear_constraint(
-        self, step: Step, u: NDArray, du: NDArray
-    ) -> tuple[NDArray, NDArray]:
-        """Enforce homogeneous linear constraints using Lagrange multiplier method.
-
-        Procuedure
-        ----------
-
-        The standard augmented Lagrange system for a set of linear constraints
-
-            C.u = r
-
-        is written as
-
-            ⎡ K   C.T⎤ ⎧ u ⎫   ⎧ F ⎫
-            ⎢        ⎥ ⎨   ⎬ = ⎨   ⎬
-            ⎣ C    0 ⎦ ⎩ 𝜆 ⎭   ⎩ r ⎭
-
-        where:
-        - K is the global stiffness
-        - C is the constraint matrix
-        - 𝜆 are the Lagrange multipliers enforcing the constraings
-        - F is the external force vector
-        - r is the rhs of the constraint.
-
-        If any DOFs participating in the constraint equations are prescribed (known), they must be
-        eliminated before assembling the augmented system.
-
-        For example, if
-
-            u_1 - u_5 = 0
-
-        and u_1 is prescribed (∆), this becomes:
-
-            -u_5 = -∆
-
-        The corresponding row of C has the column for DOF 1 zeroed and r modified by -C[i, 1] * ∆
-
-        The augmented system becomes
-
-            ⎡ K_ff   C_f.T⎤ ⎧ u_f ⎫   ⎧ F_f ⎫
-            ⎢             ⎥ ⎨     ⎬ = ⎨     ⎬
-            ⎣ C_f     0   ⎦ ⎩  𝜆  ⎭   ⎩  r  ⎭
-
-        """
-        m = len(step.equations)
-        if not m:
-            return np.empty(0), np.empty(0)
-
-        # Build the linear constrain matrix
-        m = len(step.equations)
-        n = self.num_dof
-
-        C: NDArray = np.zeros(shape=(m, n), dtype=float)
-        r: NDArray = np.zeros(shape=m, dtype=float)
-
-        for i, equation in enumerate(step.equations):
-            rhs = equation[-1]
-            for j in range(0, len(equation[:-1]), 2):
-                dof = int(equation[j])
-                coeff = float(equation[j + 1])
-                C[i, dof] = coeff
-            r[i] = rhs
-
-        # Gather prescribed DOFs and values
-        for i, row in enumerate(C):
-            for dof, value in step.dbcs:
-                coeff = row[dof]
-                if abs(coeff) > 0.0:
-                    r[i] -= coeff * (value - u[dof])
-                    row[dof] = 0.0
-
-        return C, r
