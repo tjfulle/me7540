@@ -285,8 +285,6 @@ class StaticStep(Step):
             C_f = C[:, fdofs]
             g = np.dot(C, model.u[1]) - r
             Ka = np.block([[K_ff, C_f.T], [C_f, np.zeros((neq, neq))]])
-            print(x.shape)
-            print(C.shape)
             Ra = np.hstack([R_f + np.dot(C_f.T, x[nf:]), g])
             return Ka, Ra
 
