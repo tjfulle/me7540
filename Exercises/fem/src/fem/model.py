@@ -151,7 +151,7 @@ class ExodusFile:
             for elem_var in block.element_variable_names():
                 if elem_var not in elem_vars:
                     elem_vars.append(elem_var)
-        truth_tab = np.empty((len(model.blocks), len(elem_vars)), dtype=int)
+        truth_tab = np.zeros((len(model.blocks), len(elem_vars)), dtype=int)
         for i, block in enumerate(model.blocks):
             for j, elem_var in enumerate(elem_vars):
                 if elem_var in block.element_variable_names():
