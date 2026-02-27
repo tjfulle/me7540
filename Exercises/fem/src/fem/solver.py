@@ -11,8 +11,7 @@ from numpy.typing import NDArray
 from .collections import Solution
 
 if TYPE_CHECKING:
-    from .model import Model
-    from .step import Step
+    pass
 
 
 @dataclass
@@ -67,6 +66,7 @@ class NonlinearNewtonSolver(Solver):
         atol = atol or -1.0
         rtol = rtol or 1e-8
         maxiter = maxiter or 25
+        res_norm: float = 1.0
         while it < maxiter:
             it += 1
             K, R = fun(x, *args)

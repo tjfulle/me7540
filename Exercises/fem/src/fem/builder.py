@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 
 class MeshBuilder:
-    def __init__(self, nodes: list[Sequence[int | float]], elements: list[list[int]]) -> None:
+    def __init__(self, nodes: Sequence[Sequence[int | float]], elements: list[list[int]]) -> None:
         self.assembled = False
         connected: set[int] = set([n for row in elements for n in row[1:]])
         allnodes: set[int] = set([int(row[0]) for row in nodes])
@@ -327,17 +327,21 @@ class StaticStepBuilder(StepBuilder):
         rloads = self.metadata["rloads"]
         rloads[f"rload-{len(rloads)}"] = (sideset, H, u0)
 
-    def constraint(
-        self,
-        *,
-        nodes: list[int],
-        dofs: list[int],
-        coeffs: list[float],
-        rhs: float = 0.0,
-    ) -> None:
-        if not (len(nodes) == len(dofs) == len(coeffs)):
-            raise ValueError("nodes, dofs, and coeffs must be same length")
+    def equation(self, *args: int | float) -> None:
+        if len(args) < 4:
+            raise ValueError("Equation at least one (node, dof, coeff) triple and rhs")
+        if (len(args) - 1) % 3 != 0:
+            raise ValueError("Equation must be (node, dof, coeff), ..., rhs")
         constraints = self.metadata["constraints"]
+        triples = args[:-1]
+        rhs = args[-1]
+        nodes: list[int] = []
+        dofs: list[int] = []
+        coeffs: list[float] = []
+        for i in range(0, len(triples), 3):
+            nodes.append(int(triples[i]))
+            dofs.append(int(triples[i + 1]))
+            coeffs.append(float(triples[i + 2]))
         constraints[f"constraint-{len(constraints)}"] = (nodes, dofs, coeffs, rhs)
 
     def build(self, model: Model, parent: Step | None) -> StaticStep:
@@ -485,7 +489,8 @@ class DirectStepBuilder(StaticStepBuilder):
 
 
 class ModelBuilder:
-    def __init__(self, mesh: "Mesh") -> None:
+    def __init__(self, mesh: "Mesh", name: str = "Model") -> None:
+        self.name = name
         self.assembled = False
 
         self.mesh = mesh
@@ -534,6 +539,7 @@ class ModelBuilder:
             raise ValueError(f"The following blocks have not been assigned properties: {missing}")
         self.build_dof_maps()
         model = Model(
+            name=self.name,
             mesh=self.mesh,
             blocks=self.blocks,
             num_dof=self.num_dof,
