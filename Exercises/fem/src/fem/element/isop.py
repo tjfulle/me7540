@@ -168,11 +168,6 @@ class IsoparametricElement(Element):
                 n = self.edge_normal(edge_no, p, xi)
                 traction = dsload(step, increment, time, dt, eleno, edge_no, ipt, x.tolist(), n)
                 st = self.ref_edge_coords(edge_no, xi)
-                if np.all(x > 0):
-                    print(x)
-                    print(n)
-                    print(traction)
-                    print()
                 P = self.pmatrix(st)[nft]
                 J = self.edge_jacobian(edge_no, p, xi)
                 re[nft] -= w * J * np.dot(P, traction)
