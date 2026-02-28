@@ -300,17 +300,21 @@ class StaticStepBuilder(StepBuilder):
         self.mpcs: list[list[int | float]] = []
         self.solver_opts = options
 
-    def boundary(self, *, nodeset: str, dofs: int | list[int], value: float = 0.0) -> None:
+    def boundary(
+        self, *, nodes: str | int | list[int], dofs: int | list[int], value: float = 0.0
+    ) -> None:
         if isinstance(dofs, int):
             dofs = [dofs]
         dbcs = self.metadata["dbcs"]
-        dbcs[f"dbc-{len(dbcs)}"] = (nodeset, dofs, value)
+        dbcs[f"dbc-{len(dbcs)}"] = (nodes, dofs, value)
 
-    def point_load(self, *, nodeset: str, dofs: int | list[int], value: float = 0.0) -> None:
+    def point_load(
+        self, *, nodes: str | int | list[int], dofs: int | list[int], value: float = 0.0
+    ) -> None:
         if isinstance(dofs, int):
             dofs = [dofs]
         nbcs = self.metadata["nbcs"]
-        nbcs[f"nbc-{len(nbcs)}"] = (nodeset, dofs, value)
+        nbcs[f"nbc-{len(nbcs)}"] = (nodes, dofs, value)
 
     def traction(self, *, sideset: str, magnitude: float, direction: Sequence[float]) -> None:
         dsloads = self.metadata["dsloads"]
@@ -321,14 +325,16 @@ class StaticStepBuilder(StepBuilder):
         dsloads = self.metadata["dsloads"]
         dsloads[f"dsload-{len(dsloads)}"] = ("pressure", sideset, magnitude)
 
-    def gravity(self, *, elemset: str, g: float, direction: Sequence[float]) -> None:
+    def gravity(
+        self, *, elements: str | int | list[int], g: float, direction: Sequence[float]
+    ) -> None:
         dloads = self.metadata["dloads"]
         dir = normalize(direction)
-        dloads[f"dload-{len(dloads)}"] = ("gravity", elemset, g, dir)
+        dloads[f"dload-{len(dloads)}"] = ("gravity", elements, g, dir)
 
-    def dload(self, *, elemset: str, field: Field) -> None:
+    def dload(self, *, elements: str | int | list[int], field: Field) -> None:
         dloads = self.metadata["dloads"]
-        dloads[f"dload-{len(dloads)}"] = ("dload", elemset, field)
+        dloads[f"dload-{len(dloads)}"] = ("dload", elements, field)
 
     def robin(self, *, sideset: str, u0: NDArray, H: NDArray) -> None:
         rloads = self.metadata["rloads"]
@@ -373,10 +379,16 @@ class StaticStepBuilder(StepBuilder):
 
     def construct_dbcs(self, model: Model) -> None:
         seen: dict[int, float] = {}
-        for nodeset, dofs, value in self.metadata.get("dbcs", {}).values():
-            if nodeset not in model.nodesets:
-                raise ValueError(f"nodeset {nodeset} not defined")
-            lids: list[int] = model.nodesets[nodeset]
+        for nodes, dofs, value in self.metadata.get("dbcs", {}).values():
+            lids: list[int]
+            if isinstance(nodes, str):
+                if nodes not in model.nodesets:
+                    raise ValueError(f"nodeset {nodes} not defined")
+                lids = model.nodesets[nodes]
+            elif isinstance(nodes, int):
+                lids = [model.node_map.local(nodes)]
+            else:
+                lids = [model.node_map.local(gid) for gid in nodes]
             for lid in lids:
                 for dof in dofs:
                     DOF = model.dof_map[lid, dof]
@@ -385,10 +397,16 @@ class StaticStepBuilder(StepBuilder):
 
     def construct_nbcs(self, model: Model) -> None:
         seen: dict[int, float] = defaultdict(float)
-        for nodeset, dofs, value in self.metadata.get("nbcs", {}).values():
-            if nodeset not in model.nodesets:
-                raise ValueError(f"nodeset {nodeset} not defined")
-            lids: list[int] = model.nodesets[nodeset]
+        for nodes, dofs, value in self.metadata.get("nbcs", {}).values():
+            lids: list[int]
+            if isinstance(nodes, str):
+                if nodes not in model.nodesets:
+                    raise ValueError(f"nodeset {nodes} not defined")
+                lids = model.nodesets[nodes]
+            elif isinstance(nodes, int):
+                lids = [model.node_map.local(nodes)]
+            else:
+                lids = [model.node_map.local(gid) for gid in nodes]
             for lid in lids:
                 for dof in dofs:
                     DOF = model.dof_map[lid, dof]
@@ -397,9 +415,16 @@ class StaticStepBuilder(StepBuilder):
 
     def construct_dloads(self, model: Model) -> None:
         dload: DistributedLoad
-        for ltype, elemset, *args in self.metadata.get("dloads", {}).values():
-            if elemset not in model.elemsets:
-                raise ValueError(f"element set {elemset} not defined")
+        for ltype, elements, *args in self.metadata.get("dloads", {}).values():
+            lids: list[int]
+            if isinstance(elements, str):
+                if elements not in model.elemsets:
+                    raise ValueError(f"element set {elements} not defined")
+                lids = model.elemsets[elements]
+            elif isinstance(elements, int):
+                lids = [model.elem_map.local(elements)]
+            else:
+                lids = [model.node_map.local(gid) for gid in elements]
             if ltype == "gravity":
                 pass
             elif ltype == "dload":
@@ -407,7 +432,7 @@ class StaticStepBuilder(StepBuilder):
                 dload = DistributedLoad(field=field)
             else:
                 raise ValueError(f"Unknown ltype: {ltype}")
-            for lid in model.elemsets[elemset]:
+            for lid in lids:
                 gid = model.elem_map[lid]
                 block_no = model.block_elem_map[lid]
                 block = model.blocks[block_no]
