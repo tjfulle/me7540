@@ -41,15 +41,10 @@ class Model:
         self._dof_map: NDArray = np.empty((0, 0), dtype=int)
         self._ndof: int = -1
 
-        self.u = np.empty((0, 0), dtype=float)
-        self.R = np.empty((0, 0), dtype=float)
-
     def freeze(self) -> None:
         if not self._frozen:
             self._builder.build()
             self._frozen = True
-            self.u = np.zeros((2, self.ndof), dtype=float)
-            self.R = np.zeros((2, self.ndof), dtype=float)
 
     @frozen_property
     def blocks(self) -> list[ElementBlock]:
@@ -128,18 +123,6 @@ class Model:
     @_require_unfrozen
     def assign_properties(self, *, block: str, element: Element, material: Material) -> None:
         self._builder.assign_properties(block=block, element=element, material=material)
-
-    def advance_state(self) -> None:
-        """
-        Advance the state from current solution to previous solution.
-
-        Copies the contents of self.u[1] -> self.u[0]
-        and self.R[1] -> self.R[0], preparing for next step.
-        """
-        self.u[0, :] = self.u[1, :]
-        self.R[0, :] = self.R[1, :]
-        for block in self.blocks:
-            block.advance_state()
 
     def assemble(
         self,

@@ -24,6 +24,7 @@ class Simulation:
 
         # Solution and residual storage
         self.dofs: NDArray = np.zeros((2, self.model.ndof))
+        self.react: NDArray = np.zeros((2, self.model.ndof))
 
     def advance_state(self) -> None:
         """
@@ -33,6 +34,9 @@ class Simulation:
         and self.R[1] -> self.R[0], preparing for next step.
         """
         self.dofs[0, :] = self.dofs[1, :]
+        self.react[0, :] = self.react[1, :]
+        for block in self.model.blocks:
+            block.advance_state()
 
     def static_step(
         self, name: str | None = None, period: float = 1.0, **options: Any
@@ -65,9 +69,9 @@ class Simulation:
         parent: CompiledStep | None = None
         for i, step in enumerate(self.steps):
             cstep = step.compile(self.model, parent=parent)
-            self.model.u[1] = cstep.solve(self.model.assemble, self.model.u[0])
-            self.model.advance_state()
-            file.update(i + 1, cstep)
+            self.dofs[1] = cstep.solve(self.model.assemble, self.dofs[0])
+            self.advance_state()
+            file.update(i + 1, cstep, self.dofs[1])
             parent = cstep
             self.csteps.append(cstep)
 
@@ -144,13 +148,13 @@ class ExodusFile:
 
         # Write side sets
         sideset_id = 1
-        #        for name, ss in model.sidesets.items():
-        #            file.put_side_set_param(sideset_id, len(ss), 0)
-        #            file.put_side_set_name(sideset_id, str32(name))
-        #            gids = [model.elem_map[_[0]] for _ in ss]
-        #            sides = [_[1] + 1 for _ in ss]
-        #            file.put_side_set_sides(sideset_id, gids, sides)
-        #            sideset_id += 1
+        for name, ss in model.sidesets.items():
+            file.put_side_set_param(sideset_id, len(ss), 0)
+            file.put_side_set_name(sideset_id, str32(name))
+            gids = [model.elem_map[_[0]] for _ in ss]
+            sides = [_[1] + 1 for _ in ss]
+            file.put_side_set_sides(sideset_id, gids, sides)
+            sideset_id += 1
 
         # Setup result variables
         file.put_global_variable_params(1)
@@ -163,7 +167,7 @@ class ExodusFile:
         file.put_node_variable_names(displ_names)
 
         for i in range(model.coords.shape[1]):
-            file.put_node_variable_values(1, self.displ_name(i), model.u[0, i::2])
+            file.put_node_variable_values(1, self.displ_name(i), np.zeros(model.coords.shape[0]))
 
         # Write initial element variable values
         for j, block in enumerate(model.blocks):
@@ -173,7 +177,7 @@ class ExodusFile:
         self.file = file
         self.model = model
 
-    def update(self, step_no: int, step: CompiledStep) -> None:
+    def update(self, step_no: int, step: CompiledStep, u: NDArray) -> None:
         """
         Write updated values for a new time step.
 
@@ -186,8 +190,9 @@ class ExodusFile:
 
         file.put_time(step_no + 1, step.start + step.period)
 
+        stride = model.coords.shape[1]
         for i in range(model.coords.shape[1]):
-            file.put_node_variable_values(step_no + 1, self.displ_name(i), model.u[0, i::2])
+            file.put_node_variable_values(step_no + 1, self.displ_name(i), u[i::stride])
 
         for j, block in enumerate(model.blocks):
             for name, value in block.element_variable_values():

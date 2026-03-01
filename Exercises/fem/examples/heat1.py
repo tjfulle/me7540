@@ -56,7 +56,7 @@ def heat1(esize: float = 0.05):
     step.film(sideset="Top", h=250.0, ambient_temp=25.0)
     step.dflux(sideset="Bottom", magnitude=2000.0, direction=[0.0, 1.0])
     simulation.run()
-    u = model.u[1]
+    u = simulation.dofs[1]
     fem.plotting.tplot(model.coords, model.connect, u)
     thi = u[np.where(np.abs(mesh.coords[:, 1] - 1.0) < 1e-6)[0]]
     assert np.allclose(thi, 33)
