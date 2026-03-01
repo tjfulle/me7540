@@ -35,9 +35,8 @@ def exercise(esize: float = 0.05):
     mesh.elemset("All", region=Everywhere())
 
     m = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
-    builder = fem.model.ModelBuilder(mesh, name="plate_with_hole")
-    builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=m)
-    model = builder.build()
+    model = fem.model.Model(mesh, name="plate_with_hole")
+    model.assign_properties(block="Block-1", element=fem.element.CPS3(), material=m)
 
     simulation = fem.simulation.Simulation(model)
     step = simulation.static_step()

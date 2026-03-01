@@ -66,9 +66,8 @@ def heat2(esize: float = 0.05):
     mesh.elemset("All", region=Everywhere())
 
     m = fem.material.HeatConduction(conductivity=12.0, specific_heat=1.0)
-    builder = fem.model.ModelBuilder(mesh, name="heat2")
-    builder.assign_properties(block="Block-1", element=fem.element.DCP3(), material=m)
-    model = builder.build()
+    model = fem.model.Model(mesh, name="heat2")
+    model.assign_properties(block="Block-1", element=fem.element.DCP3(), material=m)
 
     simulation = fem.simulation.Simulation(model)
     step = simulation.heat_transfer_step()

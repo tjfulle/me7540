@@ -1,5 +1,6 @@
 import logging
 from dataclasses import dataclass
+from functools import wraps
 from dataclasses import field
 from typing import Sequence
 
@@ -10,6 +11,8 @@ from .block import ElementBlock
 from .collections import Map
 from .element import Element
 from .material import Material
+from .pytools import frozen_property
+from .pytools import _require_unfrozen
 from .mesh import Mesh
 from .step import Step
 
@@ -20,46 +23,58 @@ ArrayLike = NDArray | Sequence
 logger = logging.getLogger(__name__)
 
 
-@dataclass
 class Model:
-    """
-    Finite element model container class.
+    """Finite element model container class."""
+    def __init__(self, mesh: "Mesh", name: str = "Model-1") -> None:
+        self.name = name
+        self.mesh = mesh
+        self.mesh.freeze()
 
-    Holds mesh data, block definitions, degrees of freedom mappings,
-    loading steps, solution vectors, and methods for assembly and solving.
+        self._builder = _ModelBuilder(self)
+        self._frozen = False
 
-    Args:
-        name: Human-readable model name.
-        mesh: Mesh object containing node coordinates and connectivity.
-        blocks: List of ElementBlock objects (one per element block).
-        num_dof: Total number of degrees of freedom in the model.
-        dof_map: Global dof mapping array.
-        block_dof_map: Array mapping block indices to dof indices.
-    """
+        # Populated by builder
+        self._blocks: list[ElementBlock] = []
+        self._node_freedom_table: NDArray = np.empty((0, 0), dtype=int)
+        self._node_freedom_types: list[int] = []
+        self._block_dof_map: NDArray = np.empty((0, 0), dtype=int)
+        self._dof_map: NDArray = np.empty((0, 0), dtype=int)
+        self._num_dof: int = -1
 
-    name: str
-    mesh: Mesh
-    blocks: list[ElementBlock]
-    num_dof: int
-    dof_map: NDArray
-    node_freedom_table: NDArray
-    node_freedom_types: list[int]
-    block_dof_map: NDArray
+        self.u = np.empty((0, 0), dtype=float)
+        self.R = np.empty((0, 0), dtype=float)
 
-    # Solution and residual storage
-    u: NDArray = field(init=False)
-    R: NDArray = field(init=False)
+    def freeze(self) -> None:
+        if not self._frozen:
+            self._builder.build()
+            self._frozen = True
+            self.u = np.zeros((2, self.num_dof), dtype=float)
+            self.R = np.zeros((2, self.num_dof), dtype=float)
 
-    def __post_init__(self) -> None:
-        """
-        Initialize internal solution and residual arrays.
+    @frozen_property
+    def blocks(self) -> list[ElementBlock]:
+        return self._blocks
 
-        Creates two time levels for displacements (self.u) and residuals (self.R)
-        with shape (2, num_dof). The first index holds the previous state,
-        and the second index holds the current state.
-        """
-        self.u = np.zeros((2, self.num_dof), dtype=float)
-        self.R = np.zeros((2, self.num_dof), dtype=float)
+
+    @frozen_property
+    def node_freedom_table(self) -> NDArray:
+        return self._node_freedom_table
+
+    @frozen_property
+    def node_freedom_types(self) -> list[int]:
+        return self._node_freedom_types
+
+    @frozen_property
+    def block_dof_map(self) -> NDArray:
+        return self._block_dof_map
+
+    @frozen_property
+    def dof_map(self) -> NDArray:
+        return self._dof_map
+
+    @frozen_property
+    def num_dof(self) -> int:
+        return self._num_dof
 
     @property
     def nnode(self) -> int:
@@ -110,6 +125,10 @@ class Model:
     def block_elem_map(self) -> dict[int, int]:
         """Return mapping from block index to element index."""
         return self.mesh.block_elem_map
+
+    @_require_unfrozen
+    def assign_properties(self, *, block: str, element: Element, material: Material) -> None:
+        self._builder.assign_properties(block=block, element=element, material=material)
 
     def advance_state(self) -> None:
         """
@@ -178,62 +197,41 @@ class Model:
         return self.block_dof_map[blockno, :n_block_dof]
 
 
-class ModelBuilder:
-    def __init__(self, mesh: "Mesh", name: str = "Model") -> None:
-        self.name = name
+class _ModelBuilder:
+    def __init__(self, model: Model) -> None:
+        self.model = model
         self.assembled = False
 
-        self.mesh = mesh
-        self.mesh.freeze()
-        self.blocks: list[ElementBlock] = []
-
-        # dof_map[node, dof] -> global (model) dof
-        self.node_freedom_table: NDArray = np.empty((0, 0), dtype=int)
-        self.node_freedom_types: list[int] = []
-        self.block_dof_map: NDArray = np.empty((0, 0), dtype=int)
-        self.dof_map: NDArray = np.empty((0, 0), dtype=int)
-        self.num_dof: int = -1
-
     def assign_properties(self, *, block: str, element: Element, material: Material) -> None:
-        for blk in self.blocks:
+        for blk in self.model._blocks:
             if blk.name == block:
                 raise ValueError(f"Element block {block!r} has already been assigned properties")
-        for b in self.mesh.blocks:
+        for b in self.model.mesh._blocks:
             if b.name == block:
                 blk = ElementBlock.from_topo_block(b, element, material)
-                self.blocks.append(blk)
+                self.model._blocks.append(blk)
                 break
         else:
             raise ValueError(f"Element block {block!r} is not defined")
 
-    def build(self) -> Model:
+    def build(self) -> None:
         if self.assembled:
-            raise ValueError("ModelBuilder already assembled")
-        blocks = {block.name for block in self.mesh.blocks}
-        if missing := blocks.difference({block.name for block in self.blocks}):
+            raise ValueError("ModelBuilder.build() already called")
+        blocks = {block.name for block in self.model.mesh._blocks}
+        if missing := blocks.difference({block.name for block in self.model._blocks}):
             raise ValueError(f"The following blocks have not been assigned properties: {missing}")
         self.build_dof_maps()
-        model = Model(
-            name=self.name,
-            mesh=self.mesh,
-            blocks=self.blocks,
-            num_dof=self.num_dof,
-            node_freedom_table=self.node_freedom_table,
-            node_freedom_types=self.node_freedom_types,
-            dof_map=self.dof_map,
-            block_dof_map=self.block_dof_map,
-        )
         self.assembled = True
-        return model
+        return
 
     def build_node_freedom_table(self) -> None:
         """
         Build the model-level node freedom table.
 
         Produces:
-            self.node_freedom_table : ndarray[int] of shape (nnode, n_active_dofs)
+            self._node_freedom_table : ndarray[int] of shape (nnode, n_active_dofs)
                 1 if the DOF is active at the node, 0 otherwise
-            self.node_freedom_types : ndarray[int] of length n_active_dofs
+            self._node_freedom_types : ndarray[int] of length n_active_dofs
                 Physical DOF type corresponding to each column (Ux, Uy, ..., T)
             self.num_dof : int
                 Total number of active DOFs in the model
@@ -243,23 +241,23 @@ class ModelBuilder:
         # 1) Determine max DOF index used across all blocks
         # -----------------------------
         max_dof_idx = -1
-        for block in self.blocks:
+        for block in self.model._blocks:
             for node_dofs in block.element.node_freedom_table:
                 max_dof_idx = max(max_dof_idx, max(node_dofs))
         ncol = max_dof_idx + 1  # number of physical DOF types used
 
-        nnode = self.mesh.coords.shape[0]
+        nnode = self.model.mesh.coords.shape[0]
 
         # -----------------------------
         # 2) Build full node signature (nnode x ncol)
         # -----------------------------
         node_sig_full = np.zeros((nnode, ncol), dtype=int)
 
-        for block in self.blocks:
+        for block in self.model._blocks:
             for elem_nodes in block.connect:
                 for i, block_node in enumerate(elem_nodes):
                     gid = block.node_map[block_node]
-                    lid = self.mesh.node_map.local(gid)
+                    lid = self.model.mesh.node_map.local(gid)
                     for col in block.element.node_freedom_table[i]:
                         node_sig_full[lid, col] = 1
 
@@ -271,9 +269,9 @@ class ModelBuilder:
         # -----------------------------
         # 4) Compress node signature and store
         # -----------------------------
-        self.node_freedom_table = node_sig_full[:, active_cols].copy()
-        self.node_freedom_types = active_cols.tolist()
-        self.num_dof = int(self.node_freedom_table.sum())
+        self.model._node_freedom_table = node_sig_full[:, active_cols].copy()
+        self.model._node_freedom_types = active_cols.tolist()
+        self.model._num_dof = int(self.model._node_freedom_table.sum())
 
     def build_dof_map(self) -> None:
         """
@@ -283,15 +281,15 @@ class ModelBuilder:
             self.dof_map: ndarray[int] of shape (nnode, n_active_dofs)
                 Maps (node, local DOF index in node_freedom_table) -> global DOF index
         """
-        nnode, n_active = self.node_freedom_table.shape
-        self.dof_map = -np.ones((nnode, n_active), dtype=int)
+        nnode, n_active = self.model._node_freedom_table.shape
+        self.model._dof_map = -np.ones((nnode, n_active), dtype=int)
 
         # Flatten node_freedom_table
-        flat_mask = self.node_freedom_table.ravel()
+        flat_mask = self.model._node_freedom_table.ravel()
         global_dofs = np.arange(flat_mask.sum(), dtype=int)
 
         # Assign global DOF indices where DOFs are active
-        self.dof_map[self.node_freedom_table == 1] = global_dofs
+        self.model._dof_map[self.model._node_freedom_table == 1] = global_dofs
 
     def build_block_dof_map(self) -> None:
         """
@@ -302,20 +300,20 @@ class ModelBuilder:
             bft = self.block_dof_map[blockno, :n_block_dof]
         """
         # Determine max DOFs per block
-        max_block_dofs = max(b.num_dof for b in self.blocks)
+        max_block_dofs = max(b.num_dof for b in self.model._blocks)
 
         # Initialize table with -1
-        self.block_dof_map = -np.ones((len(self.blocks), max_block_dofs), dtype=int)
+        self.model._block_dof_map = -np.ones((len(self.model._blocks), max_block_dofs), dtype=int)
 
-        for blockno, block in enumerate(self.blocks):
+        for blockno, block in enumerate(self.model._blocks):
             local_dof_idx = 0
             for i in range(block.num_nodes):
                 gid = block.node_map[i]
-                lid = self.mesh.node_map.local(gid)
+                lid = self.model.mesh.node_map.local(gid)
                 for dof_type in block.element.node_freedom_table[0]:
-                    col = self.node_freedom_types.index(dof_type)
-                    gdof = self.dof_map[lid, col]
-                    self.block_dof_map[blockno, local_dof_idx] = gdof
+                    col = self.model._node_freedom_types.index(dof_type)
+                    gdof = self.model._dof_map[lid, col]
+                    self.model._block_dof_map[blockno, local_dof_idx] = gdof
                     local_dof_idx += 1
 
     def build_dof_maps(self) -> None:

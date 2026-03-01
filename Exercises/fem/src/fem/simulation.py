@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 class Simulation:
     def __init__(self, model: "Model") -> None:
         self.model: "Model" = model
+        self.model.freeze()
         self.steps: list[StepBuilder] = []
         self.csteps: list[Step] = []
 

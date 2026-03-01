@@ -25,10 +25,9 @@ def exercise(esize: float = 0.05):
     mesh.nodeset("Top", region=lambda x, on_boundary: x[1] > 0.99)
     mesh.sideset("Bottom", region=Bottom())
 
-    builder = fem.model.ModelBuilder(mesh, name="uniaxial_stress")
+    model = fem.model.Model(mesh, name="uniaxial_stress")
     material = fem.material.LinearElastic(density=2400.0, youngs_modulus=30.0e9, poissons_ratio=0.3)
-    builder.assign_properties(block="Block-1", element=fem.element.CPS3(), material=material)
-    model = builder.build()
+    model.assign_properties(block="Block-1", element=fem.element.CPS3(), material=material)
 
     simulation = fem.simulation.Simulation(model)
     step = simulation.static_step()

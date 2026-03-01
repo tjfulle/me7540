@@ -12,18 +12,12 @@ from .block import TopoBlock
 from .cell import Cell
 from .collections import Map
 from .typing import RegionSelector
+from .pytools import frozen_property
+from .pytools import _require_unfrozen
 
 logger = logging.getLogger(__name__)
 
 
-def _require_unfrozen(method):
-    @wraps(method)
-    def wrapper(self, *args, **kwargs):
-        if getattr(self, "_frozen", False):
-            raise RuntimeError(f"Cannot call {method.__name__!r} after object is frozen")
-        return method(self, *args, **kwargs)
-
-    return wrapper
 
 
 class Mesh:
@@ -36,12 +30,13 @@ class Mesh:
 
         self._init(nodes, elements)
 
-        self.edges: list[collections.Edge] = []
-        self.blocks: list[TopoBlock] = []
-        self.block_elem_map: dict[int, int] = {}
-        self.elemsets: dict[str, list[int]] = defaultdict(list)
-        self.nodesets: dict[str, list[int]] = defaultdict(list)
-        self.sidesets: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        self._blocks: list[TopoBlock] = []
+        self._edges: list[collections.Edge] = []
+        self._block_elem_map: dict[int, int] = {}
+        self._elemsets: dict[str, list[int]] = defaultdict(list)
+        self._nodesets: dict[str, list[int]] = defaultdict(list)
+        self._sidesets: dict[str, list[tuple[int, int]]] = defaultdict(list)
+
         self._frozen = False
         self._builder = _MeshBuilder(self)
 
@@ -103,6 +98,29 @@ class Mesh:
         if errors:
             raise ValueError("Stopping due to previous errors")
 
+    @frozen_property
+    def blocks(self) -> list[TopoBlock]:
+        return self._blocks
+
+    @frozen_property
+    def edges(self) -> list[collections.Edge]:
+        return self._edges
+
+    @frozen_property
+    def block_elem_map(self) -> dict[int, int]:
+        return self._block_elem_map
+
+    @frozen_property
+    def elemsets(self) -> dict[str, list[int]]:
+        return self._elemsets
+
+    @frozen_property
+    def nodesets(self) -> dict[str, list[int]]:
+        return self._nodesets
+
+    @frozen_property
+    def sidesets(self) -> dict[str, list[tuple[int, int]]]:
+        return self._sidesets
 
 class _MeshBuilder:
     def __init__(self, mesh: Mesh) -> None:
@@ -124,7 +142,7 @@ class _MeshBuilder:
 
     def build(self) -> None:
         if self.assembled:
-            raise ValueError("MeshBuilder is already assembled")
+            raise ValueError("MeshBuilder.build() already called")
         self.assemble_blocks()
         self.detect_topology()
         self.assembled = True
@@ -132,8 +150,8 @@ class _MeshBuilder:
 
     def assemble_blocks(self) -> None:
         mesh = self.mesh
-        mesh.blocks.clear()
-        mesh.block_elem_map.clear()
+        mesh._blocks.clear()
+        mesh._block_elem_map.clear()
         assigned: set[int] = set()
         for name, spec in self.metadata.get("blocks", {}).items():
             # eids is the global elem index
@@ -154,8 +172,8 @@ class _MeshBuilder:
                 )
             assigned.update(eids)
 
-            b = len(mesh.blocks)
-            mesh.block_elem_map.update({eid: b for eid in eids})
+            b = len(mesh._blocks)
+            mesh._block_elem_map.update({eid: b for eid in eids})
 
             nids: set[int] = set()
             elements: list[list[int]] = []
@@ -170,7 +188,7 @@ class _MeshBuilder:
                 nodes.append(node)
 
             block = TopoBlock(name, nodes, elements, spec.cell_type)
-            mesh.blocks.append(block)
+            mesh._blocks.append(block)
 
         # Check if all elements are assigned to a topo block
         num_elements = mesh.connect.shape[0]
@@ -185,7 +203,7 @@ class _MeshBuilder:
         edges: dict[tuple[int, ...], list[tuple[int, int, int]]] = defaultdict(list)
 
         # Step 1: iterate all blocks and all elements in each block
-        for b, block in enumerate(self.mesh.blocks):
+        for b, block in enumerate(self.mesh._blocks):
             for e, conn in enumerate(block.connect):
                 for edge_no in range(block.cell_type.nedge):
                     ix = block.cell_type.edge_nodes(edge_no)
@@ -193,12 +211,12 @@ class _MeshBuilder:
                     edges[gids].append((b, e, edge_no))
 
         # Step 2: identify faces that are only in one element → boundary
-        self.mesh.edges.clear()
+        self.mesh._edges.clear()
         edge_normals: dict[int, list[NDArray]] = defaultdict(list)
         for specs in edges.values():
             if len(specs) == 1:
                 b, e, edge_no = specs[0]
-                block = self.mesh.blocks[b]
+                block = self.mesh._blocks[b]
                 conn = block.connect[e]
                 p = block.coords[conn]
                 normal = block.cell_type.edge_normal(edge_no, p)
@@ -208,7 +226,7 @@ class _MeshBuilder:
                 info = collections.Edge(
                     element=lid, x=xd.tolist(), edge=edge_no, normal=normal.tolist()
                 )
-                self.mesh.edges.append(info)
+                self.mesh._edges.append(info)
                 for ln in block.cell_type.edge_nodes(edge_no):
                     gid = block.node_map[conn[ln]]
                     lid = self.mesh.node_map.local(gid)
@@ -238,7 +256,7 @@ class _MeshBuilder:
     def construct_nodesets(self) -> None:
         if not self.assembled:
             raise ValueError("Assemble builder before adding constructing node sets")
-        self.mesh.nodesets.clear()
+        self.mesh._nodesets.clear()
         name: str
         region: RegionSelector | None
         nodes: list[int] | None
@@ -246,12 +264,12 @@ class _MeshBuilder:
             if region is not None:
                 for node in self.mesh.nodes:
                     if region(node.x, on_boundary=node.on_boundary):  # type: ignore
-                        self.mesh.nodesets[name].append(node.lid)
-                if name not in self.mesh.nodesets:
+                        self.mesh._nodesets[name].append(node.lid)
+                if name not in self.mesh._nodesets:
                     raise ValueError(f"{name}: could not find nodes in region")
             elif nodes is not None:
                 for gid in nodes:
-                    self.mesh.nodesets[name].append(self.mesh.node_map.local(gid))
+                    self.mesh._nodesets[name].append(self.mesh.node_map.local(gid))
 
     def elemset(self, name: str, region: RegionSelector) -> None:
         elemsets = self.metadata["elemsets"]
@@ -262,7 +280,7 @@ class _MeshBuilder:
     def construct_elemsets(self) -> None:
         if not self.assembled:
             raise ValueError("Assemble builder before adding constructing element sets")
-        self.mesh.elemsets.clear()
+        self.mesh._elemsets.clear()
         name: str
         region: RegionSelector
         for name, region in self.metadata.get("elemsets", {}).items():
@@ -270,7 +288,7 @@ class _MeshBuilder:
                 p = self.mesh.coords[conn]
                 x = p.mean(axis=0)
                 if region(x, on_boundary=False):  # type: ignore
-                    self.mesh.elemsets[name].append(e)
+                    self.mesh._elemsets[name].append(e)
 
     def sideset(self, name: str, region: RegionSelector) -> None:
         sidesets = self.metadata["sidesets"]
@@ -281,10 +299,10 @@ class _MeshBuilder:
     def construct_sidesets(self) -> None:
         if not self.assembled:
             raise ValueError("Assemble builder before adding constructing element sets")
-        self.mesh.sidesets.clear()
+        self.mesh._sidesets.clear()
         name: str
         region: RegionSelector
         for name, region in self.metadata.get("sidesets", {}).items():
-            for edge in self.mesh.edges:
+            for edge in self.mesh._edges:
                 if region(edge.x, on_boundary=True):  # type: ignore
-                    self.mesh.sidesets[name].append((edge.element, edge.edge))
+                    self.mesh._sidesets[name].append((edge.element, edge.edge))
