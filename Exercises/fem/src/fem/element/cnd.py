@@ -283,3 +283,65 @@ class CPE4(CPX4):
 
     def history_variables(self) -> list[str]:
         return ["exx", "eyy", "ezz", "exy", "sxx", "syy", "szz", "sxy"]
+
+
+class CPX8(P8, CnD, IsoparametricElement):
+    """
+    Base constant strain quadrilateral element (8 nodes).
+
+    Geometric shape (P8) with continuum material update behavior.
+    """
+
+    gauss_pts = np.array([[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]]) / np.sqrt(3.0)
+    gauss_wts = np.array([1.0, 1.0, 1.0, 1.0], dtype=float)
+    edge_gauss_pts = np.array([-1.0 / np.sqrt(3.0), 1.0 / np.sqrt(3.0)], dtype=float)
+    edge_gauss_wts = np.array([1.0, 1.0], dtype=float)
+
+    @property
+    def node_freedom_table(self) -> list[tuple[int, ...]]:
+        return [(Ux, Uy), (Ux, Uy), (Ux, Uy), (Ux, Uy)]
+
+    def pmatrix(self, xi: NDArray) -> NDArray:
+        N = self.shape(xi)
+        P = np.zeros((8, 2))
+        P[0::2, 0] = N
+        P[1::2, 1] = N
+        return P
+
+
+class CPS8(CPX8):
+    """Plane stress constant strain quadrilateral element."""
+
+    ndir = 2
+    nshr = 1
+
+    def bmatrix(self, p: NDArray, xi: NDArray) -> NDArray:
+        dNdx = self.shape_gradient(p, xi)
+        B = np.zeros((3, 8))
+        B[0, 0::2] = dNdx[0]
+        B[1, 1::2] = dNdx[1]
+        B[2, 0::2] = dNdx[1]
+        B[2, 1::2] = dNdx[0]
+        return B
+
+    def history_variables(self) -> list[str]:
+        return ["exx", "eyy", "exy", "sxx", "syy", "sxy"]
+
+
+class CPE8(CPX8):
+    """Plane strain constant strain quadrilateral element."""
+
+    ndir = 3
+    nshr = 1
+
+    def bmatrix(self, p: NDArray, xi: NDArray) -> NDArray:
+        dNdx = self.shape_gradient(p, xi)
+        B = np.zeros((4, 8))
+        B[0, 0::2] = dNdx[0]
+        B[1, 1::2] = dNdx[1]
+        B[3, 0::2] = dNdx[1]
+        B[3, 1::2] = dNdx[0]
+        return B
+
+    def history_variables(self) -> list[str]:
+        return ["exx", "eyy", "ezz", "exy", "sxx", "syy", "szz", "sxy"]
