@@ -237,7 +237,9 @@ class StaticStep(Step):
 class CompiledStaticStep(CompiledStep):
     solver_options: dict[str, Any] = field(default_factory=dict)
 
-    def solve(self, fun: Callable[..., tuple[NDArray, NDArray]], u0: NDArray) -> tuple[NDArray, NDArray]:
+    def solve(
+        self, fun: Callable[..., tuple[NDArray, NDArray]], u0: NDArray
+    ) -> tuple[NDArray, NDArray]:
         ddofs = self.ddofs
         ndof = len(u0)
         fdofs = np.array(sorted(set(range(ndof)) - set(ddofs)))

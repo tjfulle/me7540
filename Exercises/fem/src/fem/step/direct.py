@@ -42,9 +42,10 @@ class CompiledDirectStep(CompiledStep):
     No Newton iteration is performed.
     """
 
-    def solve(self, fun: Callable[..., tuple[NDArray, NDArray]], u0: NDArray) -> tuple[NDArray, NDArray]:
+    def solve(
+        self, fun: Callable[..., tuple[NDArray, NDArray]], u0: NDArray
+    ) -> tuple[NDArray, NDArray]:
         ddofs = self.ddofs
-        dvals = self.dvals[1, :]  # Target Dirichlet values at end of step
         ndof = len(u0)
         fdofs = np.array(sorted(set(range(ndof)) - set(ddofs)))
         nf = len(fdofs)
@@ -78,8 +79,8 @@ class CompiledDirectStep(CompiledStep):
         # Construct final displacement
         # -------------------------------------------------
         u = u0.copy()
-        u[fdofs] += state.x[:nf]
-        u[ddofs] = dvals
+        u[fdofs] = state.x[:nf]
+        u[ddofs] = self.dvals[1, :]
 
         R = kernel.resid
         K = kernel.stiff

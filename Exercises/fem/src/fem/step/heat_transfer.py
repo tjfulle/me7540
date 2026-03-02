@@ -19,7 +19,7 @@ from ..typing import DSLoadT
 from ..typing import RLoadT
 from .base import CompiledStep
 from .base import Step
-from .direct import CompiledDirectStep
+from .static import CompiledStaticStep
 
 if TYPE_CHECKING:
     from ..model import Model
@@ -194,7 +194,7 @@ class HeatTransferStep(Step):
 
 
 @dataclass
-class CompiledHeatTransferStep(CompiledDirectStep):
+class CompiledHeatTransferStep(CompiledStaticStep):
     """
     Single linear static step.
 

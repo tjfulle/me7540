@@ -80,7 +80,8 @@ class DCnD:
         """
         ndim = p.shape[1]
         D, q = material.eval(e, ndir=ndim, nshr=0)
-        hsv[:] = q  # store element flux or internal quantities
+        hsv[:2] = e
+        hsv[2:] = q  # store element flux or internal quantities
         return D, q
 
 
@@ -112,7 +113,7 @@ class DCP3(P3, DCnD, IsoparametricElement):
         return B
 
     def history_variables(self) -> list[str]:
-        return ["qx", "qy"]
+        return ["DTx", "DTy", "Qx", "Qy"]
 
 
 class DCP4(P4, DCnD, IsoparametricElement):
@@ -143,4 +144,4 @@ class DCP4(P4, DCnD, IsoparametricElement):
         return B
 
     def history_variables(self) -> list[str]:
-        return ["qx", "qy"]
+        return ["DTx", "DTy", "Qx", "Qy"]

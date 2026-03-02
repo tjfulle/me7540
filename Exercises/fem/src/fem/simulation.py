@@ -25,7 +25,7 @@ class Simulation:
 
         # Solution and residual storage
         self.dofs: NDArray = np.zeros((2, self.model.ndof))
-        self.react: NDArray = np.zeros((2, self.model.ndof))
+        self.flux: NDArray = np.zeros((2, self.model.ndof))
 
     def advance_state(self) -> None:
         """
@@ -35,7 +35,7 @@ class Simulation:
         and self.R[1] -> self.R[0], preparing for next step.
         """
         self.dofs[0, :] = self.dofs[1, :]
-        self.react[0, :] = self.react[1, :]
+        self.flux[0, :] = self.flux[1, :]
         for block in self.model.blocks:
             block.advance_state()
 
@@ -70,11 +70,12 @@ class Simulation:
         parent: CompiledStep | None = None
         for i, step in enumerate(self.steps):
             cstep = step.compile(self.model, parent=parent)
-            self.dofs[1], self.react[1] = cstep.solve(self.model.assemble, self.dofs[0])
+            self.dofs[1], self.flux[1] = cstep.solve(self.model.assemble, self.dofs[0])
             self.advance_state()
-            file.update(i + 1, cstep, self.dofs[1], self.react[1])
+            file.update(i + 1, cstep, self.dofs[1], self.flux[1])
             parent = cstep
             self.csteps.append(cstep)
+
 
 class ExodusFile:
     """
@@ -171,10 +172,10 @@ class ExodusFile:
             node_variable_params.append(f"displ{dim}")
         if np.any(self.umask):
             for dim in "xyz"[:ndim]:
-                node_variable_params.append(f"react{dim}")
+                node_variable_params.append(f"F{dim}")
         if np.any(self.tmask):
             node_variable_params.append("T")
-            node_variable_params.append("Q")
+            node_variable_params.append("HFL")
         file.put_node_variable_params(len(node_variable_params))
         file.put_node_variable_names(node_variable_params)
 
@@ -183,11 +184,11 @@ class ExodusFile:
             file.put_node_variable_values(1, f"displ{dim}", zero)
         if np.any(self.umask):
             for dim in "xyz"[:ndim]:
-                file.put_node_variable_values(1, f"react{dim}", zero)
+                file.put_node_variable_values(1, f"F{dim}", zero)
 
-        if "T" in node_variable_params:
+        if np.any(self.tmask):
             file.put_node_variable_values(1, "T", zero)
-            file.put_node_variable_values(1, "Q", zero)
+            file.put_node_variable_values(1, "HFL", zero)
 
         # Write initial element variable values
         for j, block in enumerate(model.blocks):
@@ -197,7 +198,7 @@ class ExodusFile:
         self.file = file
         self.model = model
 
-    def update(self, step_no: int, step: CompiledStep, dofs: NDArray, react: NDArray) -> None:
+    def update(self, step_no: int, step: CompiledStep, dofs: NDArray, flux: NDArray) -> None:
         """
         Write updated values for a new time step.
 
@@ -218,13 +219,13 @@ class ExodusFile:
             dim = "xyz"[i]
             file.put_node_variable_values(step_no + 1, f"displ{dim}", u[i::ndim])
         if np.any(self.umask):
-            R = react[self.umask]
+            R = flux[self.umask]
             for i in range(ndim):
                 dim = "xyz"[i]
-                file.put_node_variable_values(step_no + 1, f"react{dim}", R[i::ndim])
+                file.put_node_variable_values(step_no + 1, f"F{dim}", R[i::ndim])
         if np.any(self.tmask):
             file.put_node_variable_values(step_no + 1, "T", dofs[self.tmask])
-            file.put_node_variable_values(step_no + 1, "Q", react[self.tmask])
+            file.put_node_variable_values(step_no + 1, "HFL", flux[self.tmask])
 
         for j, block in enumerate(model.blocks):
             for name, value in block.element_variable_values():
